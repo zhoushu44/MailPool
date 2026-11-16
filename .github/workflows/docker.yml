@@ -186,20 +186,30 @@ jobs:
   deploy:
     name: Deploy to Server
     needs: [build-and-push, smoke-test]
-    # 只在主分支、且配置了 SERVER_HOST 时才执行；
-    # 没配服务器 Secrets 的仓库会直接跳过（不影响构建与推送）
-    if: |
-      github.event_name != 'pull_request'
-      && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-      && secrets.SERVER_HOST != ''
+    # 注意：job 级 if 不允许引用 secrets（会报 workflow 语法错误），
+    # 所以这里只判断分支；是否真的部署由第一步的检查决定。
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---- 检查服务器 Secrets 是否已配置；未配置则跳过后续步骤 ----
+      - name: Check server secrets
+        id: check
+        run: |
+          if [ -z "${{ secrets.SERVER_HOST }}" ] || [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️  未配置 SERVER_HOST / SERVER_SSH_KEY，跳过部署（构建与推送不受影响）"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 服务器配置齐全，开始部署"
+          fi
+
       # ---- 用 SSH 私钥连服务器 ----
       - name: Setup SSH key
+        if: steps.check.outputs.configured == 'true'
         run: |
           mkdir -p ~/.ssh
           # 用 printf 保留原始换行，避免 heredoc 缩进破坏 PEM 格式
@@ -211,6 +221,7 @@ jobs:
 
       # ---- 上传更新脚本 ----
       - name: Upload update script
+        if: steps.check.outputs.configured == 'true'
         run: |
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
             deploy/update.sh \
@@ -218,6 +229,7 @@ jobs:
 
       # ---- 执行更新 ----
       - name: Run update
+        if: steps.check.outputs.configured == 'true'
         run: |
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
@@ -229,6 +241,7 @@ jobs:
              bash /opt/mailpool/update.sh"
 
       - name: Summary
+        if: steps.check.outputs.configured == 'true'
         run: |
           {
             echo "## 🚀 部署完成"
