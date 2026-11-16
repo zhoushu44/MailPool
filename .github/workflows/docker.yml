@@ -186,7 +186,12 @@ jobs:
   deploy:
     name: Deploy to Server
     needs: [build-and-push, smoke-test]
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    # 只在主分支、且配置了 SERVER_HOST 时才执行；
+    # 没配服务器 Secrets 的仓库会直接跳过（不影响构建与推送）
+    if: |
+      github.event_name != 'pull_request'
+      && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+      && secrets.SERVER_HOST != ''
     runs-on: ubuntu-latest
 
     steps:
@@ -197,14 +202,17 @@ jobs:
       - name: Setup SSH key
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          # 用 printf 保留原始换行，避免 heredoc 缩进破坏 PEM 格式
+          printf '%s\n' "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+          # 校验私钥格式（PEM 不被破坏）
+          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null && echo "✅ 私钥格式正确" || { echo "❌ SERVER_SSH_KEY 格式错误（需含 BEGIN/END 完整行）"; exit 1; }
 
       # ---- 上传更新脚本 ----
       - name: Upload update script
         run: |
-          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20 \
             deploy/update.sh \
             "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/mailpool/update.sh"
 
