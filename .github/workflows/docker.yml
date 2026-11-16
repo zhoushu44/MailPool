@@ -171,3 +171,67 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker rm -f mailpool-smoke || true
+
+  # =========================================================================
+  # Job 3: 部署到服务器
+  #   推送成功后，SSH 到服务器执行 deploy/update.sh：
+  #   备份数据库 → 拉取新镜像 → 重建容器 → 健康检查 → 失败自动回滚
+  #
+  #   需要的 Secrets：
+  #     SERVER_HOST      服务器 IP
+  #     SERVER_USER      SSH 用户名（root）
+  #     SERVER_SSH_KEY   SSH 私钥（推荐，ed25519）
+  #   （或用 SERVER_PASSWORD + sshpass，见下方注释）
+  # =========================================================================
+  deploy:
+    name: Deploy to Server
+    needs: [build-and-push, smoke-test]
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- 用 SSH 私钥连服务器 ----
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      # ---- 上传更新脚本 ----
+      - name: Upload update script
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            deploy/update.sh \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:/opt/mailpool/update.sh"
+
+      # ---- 执行更新 ----
+      - name: Run update
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "chmod +x /opt/mailpool/update.sh && \
+             IMAGE='${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}' \
+             TAG='${{ env.IMAGE_VERSION }}' \
+             HOST_PORT='${{ secrets.SERVER_PORT || '18090' }}' \
+             MAILPOOL_ADMIN_PASSWORD='${{ secrets.MAILPOOL_ADMIN_PASSWORD }}' \
+             bash /opt/mailpool/update.sh"
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🚀 部署完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 服务器 | \`${{ secrets.SERVER_HOST }}\` |"
+            echo "| 镜像 | \`${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}\` |"
+            echo "| 端口 | \`${{ secrets.SERVER_PORT || '18090' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
