@@ -1,0 +1,468 @@
+{% extends "base.html" %}
+{% block title %}账号{% endblock %}
+{% block content %}
+<div class="page-title">账号</div>
+<div class="page-sub">搜索、筛选和导入 Outlook 标准格式账号</div>
+<div class="card">
+  <div class="form-row-3">
+    <input id="keyword" placeholder="搜索邮箱">
+    <select id="poolStatus">
+      <option value="">全部池状态</option>
+      <option value="available">可用</option>
+      <option value="using">占用中</option>
+      <option value="retired">已退役</option>
+    </select>
+    <select id="healthStatus">
+      <option value="">全部健康状态</option>
+      <option value="unknown">未检测</option>
+      <option value="healthy">健康</option>
+      <option value="unhealthy">异常</option>
+      <option value="dead">失效</option>
+    </select>
+    <select id="tagFilter">
+      <option value="">全部标签</option>
+    </select>
+  </div>
+  <div class="btn-row">
+    <button class="btn" onclick="loadAccounts()">查询</button>
+    <button class="btn btn-primary" onclick="startBatchRefresh()" style="background:#7c3aed;color:#fff">全量刷新 Token</button>
+    <button class="btn btn-ghost" onclick="reviveBatch()" title="把 dead 账号恢复为可用（先预览再执行）">批量恢复失效</button>
+    <button class="btn btn-ghost" onclick="exportAccounts()">导出账号</button>
+    <button class="btn btn-ghost" onclick="showRefreshLogs()">刷新历史</button>
+  </div>
+  <textarea id="importText" placeholder="email----password----client_id----refresh_token"></textarea>
+  <div class="btn-row"><button class="btn btn-success" onclick="importAccounts()">导入 Outlook 账号</button></div>
+  <div id="importResult" class="page-sub" style="margin:12px 0 0"></div>
+</div>
+<div class="card table-wrap">
+  <div id="listHint" class="page-sub" style="margin:0 0 8px"></div>
+  <table>
+    <thead><tr><th>邮箱</th><th>池状态</th><th>健康状态</th><th>检测结果</th><th>失败次数</th><th>标签</th><th>备注</th><th>绑定项目</th><th>检测时间</th><th>操作</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+<!-- Device Code Flow 弹窗 -->
+<div id="deviceModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:24px;max-width:480px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,.2)">
+    <div style="font-size:18px;font-weight:600;margin-bottom:16px">刷新 Token — Device Code Flow</div>
+    <div style="margin-bottom:12px;color:#666">请按以下步骤完成授权：</div>
+    <div style="margin-bottom:8px"><strong>1.</strong> 打开 <a id="dcUrl" href="#" target="_blank" style="color:#2563eb">Microsoft 设备登录</a></div>
+    <div style="margin-bottom:8px"><strong>2.</strong> 输入代码：<code id="dcCode" style="background:#f3f4f6;padding:2px 8px;border-radius:4px;font-size:16px;font-weight:bold;user-select:all">------</code></div>
+    <div style="margin-bottom:8px"><strong>3.</strong> 登录账号：<span id="dcEmail" style="font-weight:600"></span></div>
+    <div style="margin-bottom:16px"><strong>4.</strong> 同意授权后关闭此页面</div>
+    <div id="dcStatus" style="margin-bottom:12px;padding:8px;border-radius:4px;background:#fef3c7;color:#92400e;display:none"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeDeviceModal()" style="background:#e5e7eb;color:#374151">关闭</button>
+      <button class="btn btn-success" id="dcPollBtn" onclick="pollDeviceFlow()">开始轮询</button>
+    </div>
+  </div>
+</div>
+<!-- 刷新历史弹窗 -->
+<div id="logModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:24px;max-width:680px;width:94%;box-shadow:0 4px 24px rgba(0,0,0,.2);max-height:85vh;display:flex;flex-direction:column">
+    <div style="font-size:18px;font-weight:600;margin-bottom:16px">Token 刷新历史</div>
+    <div id="logList" style="overflow:auto;flex:1"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn" onclick="document.getElementById('logModal').style.display='none'" style="background:#e5e7eb;color:#374151">关闭</button>
+    </div>
+  </div>
+</div>
+<!-- 编辑账号弹窗 -->
+<div id="editModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:24px;max-width:480px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,.2)">
+    <div style="font-size:18px;font-weight:600;margin-bottom:8px">编辑账号</div>
+    <div class="mono" style="margin-bottom:16px;color:#6b7280" id="editEmail"></div>
+    <label class="stat-label">标签（逗号分隔，如 养号期,接码）</label>
+    <input id="editTags" style="margin-bottom:12px">
+    <label class="stat-label">代理（如 http://127.0.0.1:7890 或 socks5://user:pass@host:port）</label>
+    <input id="editProxy" placeholder="留空不使用代理" style="margin-bottom:12px">
+    <label class="stat-label">备注</label>
+    <input id="editRemark" style="margin-bottom:12px">
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeEditModal()" style="background:#e5e7eb;color:#374151">关闭</button>
+      <button class="btn btn-success" onclick="saveEditModal()">保存</button>
+    </div>
+  </div>
+</div>
+<!-- 全量刷新 Token 进度弹窗 -->
+<div id="batchModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:24px;max-width:560px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,.2)">
+    <div style="font-size:18px;font-weight:600;margin-bottom:8px">全量刷新 Token</div>
+    <div style="margin-bottom:16px;color:#666">此操作将刷新全部可刷新的 Outlook 账号 Token，并可能因账号数量和限流持续较长时间。执行期间请勿重复发起刷新。</div>
+    <div style="margin-bottom:12px;display:flex;gap:16px;flex-wrap:wrap">
+      <span>共 <b id="batchTotal">0</b> 个</span>
+      <span>已完成 <b id="batchDone">0</b></span>
+      <span style="color:#059669">成功 <b id="batchSuccess">0</b></span>
+      <span style="color:#dc2626">失败 <b id="batchFailed">0</b></span>
+      <span style="color:#9ca3af">跳过 <b id="batchSkipped">0</b></span>
+    </div>
+    <div style="margin-bottom:8px;color:#374151;word-break:break-all">当前：<span id="batchCurrent">—</span></div>
+    <div style="height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;margin-bottom:12px">
+      <div id="batchBar" style="height:100%;width:0%;background:#7c3aed;transition:width .3s"></div>
+    </div>
+    <div id="batchStatus" style="margin-bottom:12px;padding:8px;border-radius:4px;background:#f3f4f6;color:#374151;display:none;max-height:160px;overflow:auto;font-size:12px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeBatchModal()" style="background:#e5e7eb;color:#374151">关闭</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function esc(value){const el=document.createElement('div');el.textContent=String(value??'');return el.innerHTML}
+// 属性值转义（esc 不转义引号，放进 attr="..." 会被截断）
+function escAttr(value){return esc(value).replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+const statusText={available:'可用',using:'占用中',unknown:'未检测',healthy:'健康',unhealthy:'异常',dead:'失效'};
+async function loadAccounts(){
+  try{
+    const q=new URLSearchParams({provider:'outlook'});
+    const keyword=document.getElementById('keyword').value;
+    const poolStatus=document.getElementById('poolStatus').value;
+    const healthStatus=document.getElementById('healthStatus').value;
+    const tagFilter=document.getElementById('tagFilter').value;
+    if(keyword)q.set('keyword',keyword);
+    if(poolStatus)q.set('pool_status',poolStatus);
+    if(healthStatus)q.set('health_status',healthStatus);
+    if(tagFilter)q.set('tag',tagFilter);
+    // 显式带 limit，避免走服务端默认 200 导致「账号明明有 1000 个只显示 200 个」。
+    // 配合下面的总数提示，超出时给出明确说明。
+    const PAGE_SIZE = 500;
+    q.set('limit', PAGE_SIZE);
+    q.set('offset', 0);
+    const r=await api('/api/admin/emails?'+q);
+    const _accs = r.data.accounts||[];
+    const _counts = r.data.counts||{};
+    const _hint = document.getElementById('listHint');
+    if(_hint){
+      const total=_counts.total||0;
+      _hint.textContent = total > _accs.length
+        ? '共 '+total+' 条，当前仅显示最新 '+_accs.length+' 条（可用搜索/筛选缩小范围）'
+        : '共 '+total+' 条';
+    }
+    document.getElementById('rows').innerHTML = _accs.length ? _accs.map(a=>{
+      const isRiskControl = a.health_reason==='risk_control'||(a.check_result||'').toLowerCase().indexOf('service abuse')>=0;
+      const isCredentialError = a.health_reason==='credential'||(a.check_result||'').indexOf('invalid_grant')>=0;
+      
+      let actionBtns = '';
+      const jsArg = v => escAttr(JSON.stringify(String(v ?? '')));
+      const isDead = a.health_status==='dead' || a.pool_status==='retired';
+      if(isDead){
+        // 失效/退役账号：先给「恢复」，再给「刷新 Token」作为凭证补救手段
+        actionBtns = '<button class="btn btn-sm" style="padding:2px 8px;font-size:12px;background:#059669;color:#fff" onclick="reviveAccount('+a.id+','+jsArg(a.email)+')">恢复</button>';
+      }
+      if(isRiskControl){
+        // 风控账号显示"刷新 Token"按钮（通过 Device Code Flow 重新授权）
+        actionBtns += ' <button class="btn btn-sm" style="padding:2px 8px;font-size:12px;background:#2563eb;color:#fff" onclick="startRefreshToken('+a.id+','+jsArg(a.email)+')">刷新 Token</button>';
+      }else if(isCredentialError){
+        actionBtns += ' <button class="btn btn-sm" style="padding:2px 8px;font-size:12px" onclick="startRefreshToken('+a.id+','+jsArg(a.email)+')">刷新 Token</button>';
+      }
+        // JSON.stringify + escAttr：把值安全嵌入 onclick 的 JS 字符串参数
+        // （esc 不转义引号，备注里带 ' 或 " 会截断属性/字符串）
+        actionBtns += ' <button class="btn btn-sm btn-ghost" style="padding:2px 8px;font-size:12px" onclick="openEditModal('+a.id+','
+          + jsArg(a.email)+','+ jsArg(a.tags||'')+','+ jsArg(a.proxy||'')+','+ jsArg(a.remark||'')+')">编辑</button>';
+      
+      const tagHtml = (a.tags||'').split(',').filter(Boolean).map(t=>'<span style="display:inline-block;background:#ede9fe;color:#6d28d9;border-radius:999px;padding:0 8px;font-size:11px;margin:1px 2px">'+esc(t)+'</span>').join('')||'-';
+      
+      return '<tr><td class="mono">'+esc(a.email)+'</td><td>'+esc(statusText[a.pool_status]||a.pool_status)+'</td><td>'+esc(statusText[a.health_status]||a.health_status)+'</td><td title="'+escAttr(a.health_reason)+'">'+esc(a.check_result||'-')+'</td><td>'+esc(a.fail_count)+'</td><td>'+tagHtml+'</td><td>'+esc(a.remark)+'</td><td>'+esc(a.used_by)+'</td><td>'+esc(a.last_check_at||'-')+'</td><td>'+actionBtns+'</td></tr>';
+    }).join('') : '<tr><td colspan="10" style="text-align:center;color:#9ca3af;padding:24px">暂无匹配账号</td></tr>';
+  }catch(e){toast(e.message,'error')}
+}
+async function loadTagFilter(){
+  try{
+    const r=await api('/api/admin/emails/tags?provider=outlook');
+    const sel=document.getElementById('tagFilter');
+    const cur=sel.value;
+    sel.innerHTML='<option value="">全部标签</option>'+(r.data||[]).map(t=>'<option value="'+esc(t)+'">'+esc(t)+'</option>').join('');
+    sel.value=cur;
+  }catch(e){}
+}
+
+// ── 编辑账号（标签/备注/代理）────────────────────
+let _editAccountId=null;
+function openEditModal(id,email,tags,proxy,remark){
+  _editAccountId=id;
+  document.getElementById('editEmail').textContent=email;
+  document.getElementById('editTags').value=tags||'';
+  document.getElementById('editProxy').value=proxy||'';
+  document.getElementById('editRemark').value=remark||'';
+  document.getElementById('editModal').style.display='flex';
+}
+function closeEditModal(){
+  document.getElementById('editModal').style.display='none';
+  _editAccountId=null;
+}
+async function saveEditModal(){
+  try{
+    await api('/api/admin/emails/'+_editAccountId,{method:'PATCH',body:JSON.stringify({
+      tags:document.getElementById('editTags').value,
+      proxy:document.getElementById('editProxy').value,
+      remark:document.getElementById('editRemark').value
+    })});
+    toast('已保存','');
+    closeEditModal();
+    await loadAccounts();
+    await loadTagFilter();
+  }catch(e){toast(e.message,'error')}
+}
+
+// ── 恢复失效/退役账号 ─────────────────────────
+async function reviveAccount(id, email){
+  if(!confirm('确认恢复账号 '+email+' ？\n\n将把状态重置为「可用 / 未检测」，并清零失败次数。\n恢复后建议单独跑一次健康检测确认凭证有效。')) return;
+  try{
+    const r = await api('/api/admin/emails/'+id+'/revive', {method:'POST'});
+    const d = r.data||{};
+    toast('已恢复：'+d.email+'（'+(d.pool_status||'available')+' / '+(d.health_status||'unknown')+'）', '');
+    await loadAccounts();
+  }catch(e){ toast(e.message,'error'); }
+}
+
+// ── 批量恢复 dead 账号（先预览再执行）──────────
+async function reviveBatch(){
+  try{
+    let r = await api('/api/admin/emails/revive-batch', {method:'POST',
+      body: JSON.stringify({provider:'outlook', dry_run:true, limit:5000})});
+    const n = r.data.candidates || 0;
+    if(!n){ toast('没有需要恢复的失效账号',''); return; }
+    if(!confirm('发现 '+n+' 个失效(dead)账号。\n\n确认全部恢复为「可用 / 未检测」？\n恢复后需要重新做健康检测才能确认是否真的可用。')) return;
+    r = await api('/api/admin/emails/revive-batch', {method:'POST',
+      body: JSON.stringify({provider:'outlook', dry_run:false, limit:5000})});
+    toast('已恢复 '+(r.data.revived||0)+' 个账号', '');
+    await loadAccounts();
+  }catch(e){ toast(e.message,'error'); }
+}
+
+// ── 导出账号 ─────────────────────────────────
+async function exportAccounts(){
+  try{
+    const tag=document.getElementById('tagFilter').value;
+    const q=new URLSearchParams({provider:'outlook'});
+    if(tag)q.set('tag',tag);
+    const r=await api('/api/admin/emails/export?'+q);
+    const d=r.data;
+    if(!d.count){toast('没有可导出的账号','warn');return;}
+    const text='# email----password----client_id----refresh_token\n'+d.lines.join('\n');
+    const blob=new Blob([text],{type:'text/plain;charset=utf-8'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='mailpool_export_'+new Date().toISOString().slice(0,10)+'.txt';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出 '+d.count+' 个账号','');
+  }catch(e){toast(e.message,'error')}
+}
+
+// ── 刷新历史 ─────────────────────────────────
+async function showRefreshLogs(){
+  document.getElementById('logModal').style.display='flex';
+  try{
+    const r=await api('/api/admin/emails/refresh-logs?limit=50');
+    const logs=r.data.logs||[];
+    document.getElementById('logList').innerHTML = logs.length ? logs.map(l=>{
+      const triggerText = l.trigger==='schedule'?'定时':'手动';
+      const statusColor = l.status==='finished' ? (l.failed>0?'#d97706':'#059669') : '#dc2626';
+      const barW = l.total ? Math.round(l.success/l.total*100)+'%' : '0%';
+      return '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;margin-bottom:8px">'+
+        '<div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">'+
+          '<span class="mono">#'+l.id+' · '+triggerText+' · '+esc(l.created_at||'')+'</span>'+
+          '<span style="color:'+statusColor+';font-weight:600">'+esc(l.status==='finished'?'完成':'失败')+'</span>'+
+        '</div>'+
+        '<div style="display:flex;gap:16px;margin:6px 0;font-size:13px">'+
+          '<span>共 <b>'+l.total+'</b></span>'+
+          '<span style="color:#059669">成功 <b>'+l.success+'</b></span>'+
+          '<span style="color:#dc2626">失败 <b>'+l.failed+'</b></span>'+
+          '<span style="color:#9ca3af">跳过 <b>'+l.skipped+'</b></span>'+
+          '<span>耗时 <b>'+l.duration+'s</b></span>'+
+        '</div>'+
+        '<div style="height:6px;background:#e5e7eb;border-radius:3px;overflow:hidden"><div style="height:100%;width:'+barW+';background:#7c3aed;border-radius:3px"></div></div>'+
+        (function(){
+          // detail 现在是 {summary, results:[...]}；旧记录是纯数组，做兼容
+          var parsed=null;
+          try{ parsed=JSON.parse(l.detail||''); }catch(e){ return ''; }
+          var rows = Array.isArray(parsed) ? parsed : ((parsed && parsed.results) || []);
+          var bad = rows.filter(function(r){ return r.status !== 'success'; });
+          if(!bad.length){
+            // 有失败数但没有明细：通常是历史记录（保存逻辑修复前被截断）
+            if(l.failed > 0) return '<div style="margin-top:8px;font-size:12px;color:#d97706">失败 '+l.failed+' 条，但该条历史记录未保存失败明细</div>';
+            return '<div style="margin-top:8px;font-size:12px;color:#6b7280">无异常账号</div>';
+          }
+          return '<div style="margin-top:8px;max-height:180px;overflow:auto;font-size:12px">'+
+            bad.map(function(r){
+              return '<div style="padding:2px 0"><span class="mono">'+esc(r.email||'')+'</span> '+
+                '<span style="color:#dc2626">'+esc(r.status||'')+'</span> '+
+                '<span style="color:#6b7280">'+esc(String(r.message||'').slice(0,100))+'</span></div>';
+            }).join('')+'</div>';
+        })()+
+      '</div>';
+    }).join('') : '<div style="color:#9ca3af;text-align:center;padding:24px">暂无刷新记录</div>';
+  }catch(e){toast(e.message,'error');document.getElementById('logList').textContent='加载失败: '+e.message;}
+}
+async function importAccounts(){
+  try{
+    const r=await api('/api/admin/emails/import',{method:'POST',body:JSON.stringify({provider:'outlook',text:document.getElementById('importText').value})});
+    const d=r.data;
+    const details=(d.errors||[]).length?'；'+d.errors.join('；'):'';
+    document.getElementById('importResult').textContent=d.message+details;
+    toast(d.message,d.error_count?'warn':'');
+    if(!d.error_count)document.getElementById('importText').value='';
+    await loadAccounts();
+  }catch(e){toast(e.message,'error')}
+}
+
+let _dcAccountId = null;
+let _dcPollTimer = null;
+
+async function startRefreshToken(accountId, email){
+  try{
+    const r=await api('/api/admin/emails/'+accountId+'/refresh-token',{method:'POST'});
+    _dcAccountId = accountId;
+    document.getElementById('dcUrl').href = r.data.verification_uri;
+    document.getElementById('dcUrl').textContent = r.data.verification_uri;
+    document.getElementById('dcCode').textContent = r.data.user_code;
+    document.getElementById('dcEmail').textContent = email;
+    document.getElementById('dcStatus').style.display = 'none';
+    document.getElementById('dcPollBtn').textContent = '轮询中…';
+    document.getElementById('deviceModal').style.display = 'flex';
+    window.open(r.data.verification_uri, '_blank');
+    // 自动开始轮询
+    setTimeout(pollDeviceFlow, 1000);
+  }catch(e){toast(e.message,'error')}
+}
+
+async function pollDeviceFlow(){
+  if(!_dcAccountId)return;
+  const btn = document.getElementById('dcPollBtn');
+  const st = document.getElementById('dcStatus');
+  btn.textContent = '轮询中…';
+  btn.disabled = true;
+  st.style.display = 'block';
+  st.style.background = '#fef3c7';
+  st.style.color = '#92400e';
+  st.textContent = '等待授权中…';
+
+  _dcPollTimer = setInterval(async () => {
+    try{
+      const r=await api('/api/admin/emails/'+_dcAccountId+'/refresh-token/status');
+      const d=r.data;
+      if(d.status==='success'){
+        st.style.background = '#d1fae5';
+        st.style.color = '#065f46';
+        st.textContent = 'Token 刷新成功！';
+        btn.textContent = '完成';
+        btn.disabled = false;
+        btn.onclick = ()=>{closeDeviceModal();loadAccounts();};
+        clearInterval(_dcPollTimer);
+        toast('Token 刷新成功','');
+      }else if(d.status==='declined'||d.status==='expired'||d.status==='error'){
+        st.style.background = '#fee2e2';
+        st.style.color = '#991b1b';
+        st.textContent = d.message;
+        btn.textContent = '重试';
+        btn.disabled = false;
+        btn.onclick = pollDeviceFlow;
+        clearInterval(_dcPollTimer);
+      }else{
+        st.textContent = d.message||'等待授权中…';
+      }
+    }catch(e){
+      st.style.background = '#fee2e2';
+      st.style.color = '#991b1b';
+      st.textContent = e.message;
+      btn.textContent = '重试';
+      btn.disabled = false;
+      clearInterval(_dcPollTimer);
+    }
+  }, 3000);
+}
+
+function closeDeviceModal(){
+  if(_dcPollTimer)clearInterval(_dcPollTimer);
+  document.getElementById('deviceModal').style.display = 'none';
+  _dcAccountId = null;
+}
+
+async function deleteAccount(accountId, email){
+  if(!confirm(`确定要删除账号 ${email} 吗？\n\n此操作将永久删除该账号，无法恢复！`))return;
+  try{
+    await api('/api/admin/emails/'+accountId, {method:'DELETE'});
+    toast('账号已删除','');
+    await loadAccounts();
+  }catch(e){toast(e.message,'error')}
+}
+
+// ── 全量刷新 Token ──────────────────────────────
+let _batchTaskId = null;
+let _batchPollTimer = null;
+
+async function startBatchRefresh(){
+  const confirmed = confirm('确认全量刷新 Token？\n\n此操作将刷新全部可刷新的 Outlook 账号 Token，并可能因账号数量和限流持续较长时间。执行期间请勿重复发起刷新。');
+  if(!confirmed) return;
+  try{
+    const r=await api('/api/admin/emails/refresh-all',{method:'POST',body:JSON.stringify({provider:'outlook'})});
+    const d=r.data;
+    if(d.running && !d.task_id){
+      toast(d.message,'warn');
+      return;
+    }
+    _batchTaskId = d.task_id;
+    document.getElementById('batchTotal').textContent = d.total||0;
+    document.getElementById('batchDone').textContent = '0';
+    document.getElementById('batchSuccess').textContent = '0';
+    document.getElementById('batchFailed').textContent = '0';
+    document.getElementById('batchSkipped').textContent = '0';
+    document.getElementById('batchBar').style.width = '0%';
+    document.getElementById('batchStatus').style.display = 'none';
+    document.getElementById('batchModal').style.display = 'flex';
+    toast(d.message,'');
+    pollBatchStatus();
+  }catch(e){toast(e.message,'error')}
+}
+
+async function pollBatchStatus(){
+  if(!_batchTaskId) return;
+  try{
+    const r=await api('/api/admin/emails/refresh-all/status?task_id='+_batchTaskId);
+    const d=r.data||{};
+    document.getElementById('batchTotal').textContent = d.total||0;
+    document.getElementById('batchDone').textContent = d.done||0;
+    document.getElementById('batchSuccess').textContent = d.success||0;
+    document.getElementById('batchFailed').textContent = d.failed||0;
+    document.getElementById('batchSkipped').textContent = d.skipped||0;
+    document.getElementById('batchCurrent').textContent = d.current_email||'—';
+    const total = d.total||0;
+    const done = d.done||0;
+    document.getElementById('batchBar').style.width = total ? Math.round(done/total*100)+'%' : '0%';
+    if(d.status==='running'){
+      _batchPollTimer = setTimeout(pollBatchStatus, 2000);
+    }else{
+      clearTimeout(_batchPollTimer);
+      const st = document.getElementById('batchStatus');
+      st.style.display = 'block';
+      st.style.background = (d.failed||0)>0 ? '#fef2f2' : '#d1fae5';
+      st.style.color = (d.failed||0)>0 ? '#991b1b' : '#065f46';
+      const lines = (d.results||[]).map(x=>{
+        const icon = x.status==='success'?'✓':(x.status==='failed'?'✗':'—');
+        return icon+' '+x.email+' · '+x.message;
+      });
+      st.innerHTML = '刷新完成：成功 '+d.success+'，失败 '+d.failed+'，跳过 '+d.skipped+'<br>'+lines.join('<br>');
+      toast('全量刷新完成：成功 '+d.success+'，失败 '+d.failed,'');
+      await loadAccounts();
+    }
+  }catch(e){
+    clearTimeout(_batchPollTimer);
+    const st = document.getElementById('batchStatus');
+    st.style.display = 'block';
+    st.style.background = '#fef2f2';
+    st.style.color = '#991b1b';
+    st.textContent = '查询进度失败：'+e.message;
+  }
+}
+
+function closeBatchModal(){
+  clearTimeout(_batchPollTimer);
+  document.getElementById('batchModal').style.display = 'none';
+}
+
+loadAccounts();
+loadTagFilter();
+</script>
+{% endblock %}

@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}总览{% endblock %}
+{% block content %}
+<div class="page-title">数据概览大盘</div>
+<div class="page-sub">总览 / 验证码提取 / API 调用 / 邮箱池 / 系统活动</div>
+
+<div class="card">
+  <div class="tab-bar" style="display:flex;gap:4px;flex-wrap:wrap;border-bottom:2px solid #e5e7eb;padding-bottom:0;margin-bottom:16px">
+    <button class="tab-btn active" id="tab-0" onclick="switchTab(0)" style="padding:8px 18px;border:1px solid #e5e7eb;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;cursor:pointer;font-size:14px;font-weight:600;color:#111">总览</button>
+    <button class="tab-btn" id="tab-1" onclick="switchTab(1)" style="padding:8px 18px;border:1px solid #e5e7eb;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;cursor:pointer;font-size:14px;color:#4b5563">验证码提取</button>
+    <button class="tab-btn" id="tab-2" onclick="switchTab(2)" style="padding:8px 18px;border:1px solid #e5e7eb;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;cursor:pointer;font-size:14px;color:#4b5563">API 调用</button>
+    <button class="tab-btn" id="tab-3" onclick="switchTab(3)" style="padding:8px 18px;border:1px solid #e5e7eb;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;cursor:pointer;font-size:14px;color:#4b5563">邮箱池</button>
+    <button class="tab-btn" id="tab-4" onclick="switchTab(4)" style="padding:8px 18px;border:1px solid #e5e7eb;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;cursor:pointer;font-size:14px;color:#4b5563">系统活动</button>
+  </div>
+
+  <div id="panel-0">
+    <div class="stats-grid">
+      <div class="stat-card"><div class="stat-value">-</div><div class="stat-label">账号总数</div></div>
+      <div class="stat-card"><div class="stat-value">-</div><div class="stat-label">可用池号</div></div>
+      <div class="stat-card"><div class="stat-value ok">-</div><div class="stat-label">健康账号</div></div>
+      <div class="stat-card"><div class="stat-value warn">-</div><div class="stat-label">异常账号</div></div>
+      <div class="stat-card"><div class="stat-value dead">-</div><div class="stat-label">失效账号</div></div>
+      <div class="stat-card"><div class="stat-value">-</div><div class="stat-label">今日邮件</div></div>
+      <div class="stat-card"><div class="stat-value">-</div><div class="stat-label">今日验证码</div></div>
+      <div class="stat-card"><div class="stat-value">-</div><div class="stat-label">启用项目</div></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">运行监控</div>
+      <div class="form-row">
+        <div><div class="stat-label">账号健康率</div><div id="healthRate" class="stat-value">-</div></div>
+        <div><div class="stat-label">最近扫描时间</div><div id="lastScan" class="mono">-</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panel-1" style="display:none">
+    <div class="card" style="margin-bottom:12px">
+      <div class="form-row-3">
+        <input id="codeEmail" placeholder="按邮箱过滤">
+        <input id="codeProject" placeholder="按项目过滤">
+        <button class="btn" onclick="loadCodes()">查询</button>
+      </div>
+    </div>
+    <div class="card table-wrap"><table>
+      <thead><tr><th>时间</th><th>邮箱</th><th>项目</th><th>发件人</th><th>主题</th><th>验证码</th><th>来源</th></tr></thead>
+      <tbody id="codeRows"></tbody>
+    </table></div>
+  </div>
+
+  <div id="panel-2" style="display:none">
+    <div class="stats-grid" id="apiStats"></div>
+  </div>
+
+  <div id="panel-3" style="display:none">
+    <div class="stats-grid" id="poolStats"></div>
+    <div class="card" style="margin-top:16px">
+      <div class="card-title">按 provider 分布</div>
+      <div id="providerRows" class="page-sub"></div>
+    </div>
+  </div>
+
+  <div id="panel-4" style="display:none">
+    <div class="card" style="margin-bottom:12px"><div class="card-title">Token 刷新概况</div>
+      <div class="stats-grid" id="refreshStats" style="margin-top:8px"></div>
+      <div class="card-title" style="margin-top:20px">刷新历史</div>
+      <div id="refreshLogRows" class="page-sub" style="max-height:300px;overflow:auto"></div>
+    </div>
+    <div class="card"><div class="card-title">最近收件</div><div id="recentRows" class="page-sub"></div></div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function esc(value){const el=document.createElement('div');el.textContent=String(value??'');return el.innerHTML}
+const tabColors={0:'#111',1:'#4b5563',2:'#4b5563',3:'#4b5563',4:'#4b5563'};
+function switchTab(i){
+  for(let k=0;k<5;k++){
+    document.getElementById('panel-'+k).style.display = k===i ? 'block' : 'none';
+    const btn=document.getElementById('tab-'+k);
+    btn.style.color = k===i ? '#111' : '#4b5563';
+    btn.style.fontWeight = k===i ? '600' : '400';
+    btn.style.boxShadow = k===i ? 'inset 0 -2px 0 #2563eb' : 'none';
+  }
+  if(i===0)loadSummary();
+  if(i===1)loadCodes();
+  if(i===2)loadApiStats();
+  if(i===3)loadPoolStats();
+  if(i===4)loadSystemActivity();
+}
+
+async function loadSummary(){
+  try{
+    const r=await api('/api/admin/overview/summary');
+    const d=r.data;
+    const cards=[
+      [d.accounts.total,'账号总数',''],[d.pool.available,'可用池号','ok'],[d.pool.claimed,'占用账号','warn'],
+      [d.accounts.healthy,'健康账号','ok'],[d.accounts.unhealthy,'异常账号','warn'],[d.accounts.unknown,'未检测账号',''],
+      [d.pool.dead,'失效账号','dead'],[d.today.mails,'今日邮件',''],[d.today.verification_codes,'今日验证码',''],[d.projects.enabled,'启用项目','']
+    ];
+    const box=document.getElementById('panel-0').querySelector('.stats-grid');
+    box.innerHTML=cards.map(x=>'<div class="stat-card"><div class="stat-value '+x[2]+'">'+x[0]+'</div><div class="stat-label">'+x[1]+'</div></div>').join('');
+    document.getElementById('healthRate').textContent=d.monitoring.health_rate+'%';
+    document.getElementById('lastScan').textContent=d.monitoring.last_scan_at||'尚未扫描';
+  }catch(e){toast(e.message,'error')}
+}
+
+async function loadCodes(){
+  try{
+    const q=new URLSearchParams({limit:50});
+    const email=document.getElementById('codeEmail').value;
+    const project=document.getElementById('codeProject').value;
+    if(email)q.set('email',email);
+    if(project)q.set('project_code',project);
+    const r=await api('/api/admin/codes?'+q);
+    const rows=r.data.records||[];
+    document.getElementById('codeRows').innerHTML=rows.length?rows.map(x=>
+      '<tr><td class="mono" style="white-space:nowrap">'+esc(x.received_at||'')+'</td><td class="mono">'+esc(x.email)+'</td><td>'+esc(x.project_code||'-')+'</td><td>'+esc(x.sender||'-')+'</td><td title="'+esc(x.body_preview)+'">'+esc(x.subject||'-')+'</td><td><b style="color:#059669">'+esc(x.code)+'</b></td><td>'+esc(x.code_source||'rule')+'</td></tr>'
+    ).join(''):'<tr><td colspan="7" style="text-align:center;color:#9ca3af">暂无验证码提取记录</td></tr>';
+  }catch(e){toast(e.message,'error')}
+}
+
+async function loadApiStats(){
+  try{
+    const r=await api('/api/admin/overview/summary');
+    const op=r.data.monitoring.operations||{};
+    const items=[
+      ['取号成功',op.acquire_success||0,'ok'],['取号失败',op.acquire_failed||0,'warn'],
+      ['收信成功',op.receive_success||0,'ok'],['收信超时',op.receive_timeout||0,'warn'],
+      ['释放次数',op.release_count||0,''],['健康扫描异常',op.health_failure||0,'dead'],
+    ];
+    document.getElementById('apiStats').innerHTML=items.map(x=>'<div class="stat-card"><div class="stat-value '+x[2]+'">'+x[1]+'</div><div class="stat-label">'+x[0]+'</div></div>').join('');
+  }catch(e){toast(e.message,'error')}
+}
+
+async function loadPoolStats(){
+  try{
+    const r=await api('/api/admin/overview/summary');
+    const d=r.data;
+    document.getElementById('poolStats').innerHTML=[
+      ['总账号',d.accounts.total,''],['可用',d.pool.available,'ok'],['占用',d.pool.claimed,'warn'],
+      ['健康',d.accounts.healthy,'ok'],['异常',d.accounts.unhealthy,'warn'],['失效',d.pool.dead,'dead'],
+    ].map(x=>'<div class="stat-card"><div class="stat-value '+x[2]+'">'+x[1]+'</div><div class="stat-label">'+x[0]+'</div></div>').join('');
+    const byProv=d.accounts.by_provider||{};
+    document.getElementById('providerRows').innerHTML='<div class="form-row">'+
+      Object.entries(byProv).map(([p,c])=>'<span>'+esc(p)+'：<b>'+c+'</b></span>').join('')
+      +'</div>';
+  }catch(e){toast(e.message,'error')}
+}
+
+async function loadSystemActivity(){
+  try{
+    const r=await api('/api/admin/overview/refreshes');
+    const d=r.data;
+    const last=d.last||{};
+    document.getElementById('refreshStats').innerHTML=[
+      ['最近刷新',last.trigger==='schedule'?'定时':'手动',''],['总账号',last.total||0,''],
+      ['成功',last.success||0,'ok'],['失败',last.failed||0,'warn'],
+      ['今日刷新次数',d.today_count||0,''],['历史记录',d.history_count||0,''],
+    ].map(x=>'<div class="stat-card"><div class="stat-value '+x[2]+'">'+x[1]+'</div><div class="stat-label">'+x[0]+'</div></div>').join('');
+    const hr=await api('/api/admin/emails/refresh-logs?limit=10');
+    const logs=hr.data.logs||[];
+    document.getElementById('refreshLogRows').innerHTML=logs.length?logs.map(l=>
+      '<div style="border:1px solid #e5e7eb;border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:13px">'+
+      '<span class="mono">#'+l.id+'</span> · '+(l.trigger==='schedule'?'定时':'手动')+' · 共'+l.total+
+      ' · <span style="color:#059669">成功'+l.success+'</span>'+
+      ' · <span style="color:#dc2626">失败'+l.failed+'</span>'+
+      ' · 耗时'+l.duration+'s'+
+      ' · <span class="mono">'+esc(l.created_at||'')+'</span></div>'
+    ).join(''):'暂无记录';
+    const mr=await api('/api/admin/overview/summary');
+    const recent=await api('/api/admin/codes?limit=8');
+    const recs=recent.data.records||[];
+    document.getElementById('recentRows').innerHTML=recs.length?recs.map(x=>
+      '<div style="padding:6px 0;border-bottom:1px solid #f3f4f6;font-size:13px"><b style="color:#059669">'+esc(x.code)+'</b> · '+esc(x.email)+' · '+esc(x.sender||'-')+' · <span class="mono">'+esc(x.received_at||'')+'</span></div>'
+    ).join(''):'暂无收件';
+  }catch(e){toast(e.message,'error')}
+}
+
+loadSummary();
+</script>
+{% endblock %}

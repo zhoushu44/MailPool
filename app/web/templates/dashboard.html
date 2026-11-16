@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}仪表盘{% endblock %}
+{% block content %}
+<div class="page-title">仪表盘</div>
+<div class="page-sub">选择项目接收验证码，临时邮箱与固定号池一览</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="stat-value">{{ counts.total }}</div>
+        <div class="stat-label">邮箱总数</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value ok">{{ counts.available }}</div>
+        <div class="stat-label">可用</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value warn">{{ counts.using }}</div>
+        <div class="stat-label">占用中</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value dead">{{ counts.dead }}</div>
+        <div class="stat-label">失效</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value">{{ projects|length }}</div>
+        <div class="stat-label">项目数</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">项目
+        <span style="flex:1"></span>
+        <a href="/projects" class="btn btn-ghost btn-sm">管理</a>
+    </div>
+    {% if projects %}
+    <div class="mp-tabs">
+        <button class="mp-tab active" onclick="filterProjects(this, 'all')">全部</button>
+        <button class="mp-tab" onclick="filterProjects(this, 'temporary')">临时邮箱</button>
+        <button class="mp-tab" onclick="filterProjects(this, 'pooled')">固定邮箱</button>
+    </div>
+    <div class="project-grid">
+        {% for p in projects %}
+        <div class="project-card mp-card" data-type="{{ 'pooled' if p.is_pooled else 'temporary' }}">
+            <div class="mp-card-head">
+                {% if p.logo_src %}<img class="project-logo" src="{{ p.logo_src }}" alt="{{ p.name }}">
+                {% else %}<div class="project-logo project-logo-fallback">{{ p.name[:1] }}</div>{% endif %}
+                <div class="mp-card-name">
+                    <div class="project-name">{{ p.name }}</div>
+                    <div class="project-code mono">{{ p.code }}</div>
+                </div>
+            </div>
+            <div class="mp-card-body">
+                <div class="mp-row"><span>邮箱源</span><b>{{ p.provider_name }}</b></div>
+                <div class="mp-row"><span>可用数量</span><b>{% if p.is_pooled %}{{ p.available }}{% else %}∞{% endif %}</b></div>
+            </div>
+            <div class="mp-card-foot">
+                {% if p.enabled %}<span class="badge badge-on">启用</span>{% else %}<span class="badge badge-off">停用</span>{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">还没有项目，去 <a href="/projects">项目管理</a> 添加一个。</div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="card-title">最近收件</div>
+    {% if recent %}
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>时间</th><th>邮箱</th><th>项目</th><th>发件人</th><th>主题</th><th>验证码</th></tr></thead>
+        <tbody>
+        {% for r in recent %}
+        <tr>
+            <td class="mono" style="white-space:nowrap">{{ r.received_at.strftime('%m-%d %H:%M:%S') }}</td>
+            <td class="mono">{{ r.email }}</td>
+            <td class="mono">{{ r.project_code }}</td>
+            <td>{{ r.sender }}</td>
+            <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ r.subject }}</td>
+            <td>{% if r.code %}<span class="badge badge-code">{{ r.code }}</span>{% else %}-{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="empty">暂无收件记录</div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterProjects(btn, type) {
+    document.querySelectorAll('.mp-tab').forEach(function (t) {
+        t.classList.toggle('active', t === btn);
+    });
+    document.querySelectorAll('.mp-card').forEach(function (c) {
+        c.style.display = (type === 'all' || c.dataset.type === type) ? '' : 'none';
+    });
+}
+</script>
+{% endblock %}

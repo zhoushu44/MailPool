@@ -1,0 +1,16 @@
+services:
+  mailpool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mailpool
+    restart: unless-stopped
+    init: true
+    ports:
+      - "18080:18080"
+    environment:
+      TZ: Asia/Shanghai
+      MAILPOOL_ADMIN_PASSWORD: "请修改此口令"
+    volumes:
+      - ./data:/app/data
+    shm_size: "1gb"

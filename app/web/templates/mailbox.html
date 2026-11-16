@@ -1,0 +1,995 @@
+{% extends "base.html" %}
+{% block title %}收件箱{% endblock %}
+{% block content %}
+<style>
+/* ── 对齐 Outlook Email Plus 邮箱页：标准三栏 / 简洁 双模式 ── */
+.mbx-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.mbx-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mbx-toolbar .mn-tabs { margin-bottom: 0; }
+
+/* 标准三栏工作台 */
+.mbx-workbench {
+  display: grid;
+  gap: 0;
+  min-height: 560px;
+  height: calc(100vh - 200px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--card);
+}
+.mbx-panel {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--card);
+}
+.mbx-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #f1f2f4;
+  min-height: 36px;
+  flex-shrink: 0;
+}
+.mbx-panel-head .mbx-panel-title { font-weight: 500; font-size: 13px; }
+.mbx-panel-head.collapsed { flex-direction: column; justify-content: center; padding: 8px 0; border-bottom: none; }
+.mbx-panel-head.collapsed .mbx-panel-title { writing-mode: vertical-rl; font-size: 12px; letter-spacing: 2px; }
+.mbx-panel-body { flex: 1; min-height: 0; overflow: auto; }
+.mbx-collapse-btn {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--muted-foreground); font-size: 12px; line-height: 1;
+  padding: 4px 6px; border-radius: 6px; font-family: inherit;
+}
+.mbx-collapse-btn:hover { background: var(--accent); color: var(--foreground); }
+.mbx-resizer {
+  width: 6px; cursor: col-resize; background: transparent;
+  border-left: 1px solid #f1f2f4; align-self: stretch;
+}
+.mbx-resizer:hover, .mbx-resizer.dragging { background: var(--ring); }
+
+/* 分组列表 */
+.mbx-group-list { list-style: none; padding: 6px; margin: 0; }
+.mbx-group-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; color: var(--foreground); transition: background .15s;
+}
+.mbx-group-item:hover { background: var(--accent); }
+.mbx-group-item.active { background: #eef2f7; font-weight: 500; }
+.mbx-group-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.mbx-group-count { margin-left: auto; font-size: 12px; color: var(--muted-foreground); }
+
+/* 账号面板 */
+.mbx-account-search { padding: 6px 8px 8px; }
+.mbx-account-search input { margin-bottom: 0; padding: 6px 10px; font-size: 13px; height: 32px; }
+.mbx-account-list { padding: 0 6px 8px; }
+.mbx-account-card {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.mbx-account-card:hover { border-color: #c8cbd1; }
+.mbx-account-card.active { border-color: var(--foreground); background: #fafafa; }
+.mbx-account-email { font-weight: 600; font-size: 13px; word-break: break-all; display: block; }
+.mbx-account-email:hover { color: var(--primary-hover); }
+.mbx-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.mbx-tag {
+  display: inline-flex; align-items: center; padding: 0 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 500; line-height: 1.7;
+  border: 1px solid var(--border); background: var(--muted); color: var(--muted-foreground);
+}
+.mbx-tag.ok { background: #f0fdf4; color: #166534; border-color: #dcfce7; }
+.mbx-tag.warn { background: #fffbeb; color: #b45309; border-color: #fef3c7; }
+.mbx-tag.dead { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.mbx-account-meta { font-size: 12px; color: var(--muted-foreground); margin-top: 4px; }
+.mbx-account-actions { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-top: 6px; flex-wrap: wrap; }
+.mbx-account-actions .btn { padding: 2px 9px; font-size: 12px; }
+
+/* 邮件工作台：列表 + 详情 */
+.mbx-email-work {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) 1fr;
+  gap: 0; height: 100%; min-height: 0;
+}
+.mbx-email-left { min-height: 0; overflow: hidden; display: flex; flex-direction: column; border-right: 1px solid #f1f2f4; }
+.mbx-email-toolbar { padding: 8px 10px; border-bottom: 1px solid #f1f2f4; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mbx-email-toolbar select, .mbx-email-toolbar input { width: auto; margin-bottom: 0; padding: 4px 8px; font-size: 12px; height: 30px; }
+.mbx-email-toolbar input[type=text] { width: 120px; }
+.mbx-email-list { flex: 1; overflow-y: auto; min-height: 0; }
+.mbx-msg-item { padding: 9px 12px; border-bottom: 1px solid #f6f7f8; cursor: pointer; transition: background .12s; }
+.mbx-msg-item:hover { background: #fafafa; }
+.mbx-msg-item.active { background: #eef2f7; }
+.mbx-msg-item.unread .mbx-msg-subject { font-weight: 600; }
+.mbx-msg-subject { font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mbx-msg-from { font-size: 12px; color: var(--muted-foreground); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; margin-top: 1px; }
+.mbx-msg-meta { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; color: #9ca3af; margin-top: 1px; }
+.mbx-msg-loadmore { padding: 12px; text-align: center; }
+.mbx-email-detail { min-height: 0; overflow-y: auto; padding: 14px; }
+.mbx-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0; }
+.mbx-detail-alert { display: none; }
+.mbx-detail-alert.show { display: block; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 8px 12px; margin: 10px 0; font-size: 13px; }
+.mbx-detail-alert.error { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.mbx-detail-meta { color: var(--muted-foreground); font-size: 13px; line-height: 1.8; }
+.trust-row { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted-foreground); }
+
+/* 简洁模式 */
+.mbx-compact-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.mbx-compact-toolbar .mn-tabs { margin-bottom: 0; }
+.mbx-compact-search { width: 220px; }
+.mbx-compact-search input { margin-bottom: 0; padding: 6px 10px; font-size: 13px; height: 32px; }
+.mbx-table-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.mbx-table-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #f1f2f4; flex-wrap: wrap; }
+.mbx-table-title { font-weight: 600; font-size: 14px; }
+.mbx-table-sub { color: var(--muted-foreground); font-size: 12px; margin-left: 6px; font-weight: 400; }
+.mbx-table-wrap { overflow-x: auto; }
+.mbx-table-wrap table { min-width: 860px; }
+.mbx-table-wrap th, .mbx-table-wrap td { padding: 9px 12px; white-space: nowrap; vertical-align: middle; }
+.mbx-empty { color: var(--muted-foreground); text-align: center; padding: 40px 0; font-size: 13px; }
+
+/* ── 模式切换（照抄 Outlook Email Plus：mailbox-view-switcher + mode-pill 胶囊）── */
+.mailbox-view-switcher {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem;
+  border-radius: 999px;
+  background: var(--accent);
+  border: 1px solid var(--border);
+}
+.mode-switch .mode-pill {
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground);
+  padding: 0.45rem 0.95rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .15s;
+}
+.mode-switch .mode-pill:hover { color: var(--foreground); }
+.mode-switch .mode-pill.active {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: 0 1px 4px rgba(15, 17, 21, .08);
+}
+</style>
+
+<div class="mbx-page">
+  <div class="mbx-head">
+    <div>
+      <div class="page-title">收件箱</div>
+      <div class="page-sub" id="pageSub">管理邮箱账号与查看邮件</div>
+    </div>
+    <div class="mbx-toolbar">
+      <div id="mailboxViewModeSwitcher" class="mailbox-view-switcher mode-switch">
+        <button class="mode-pill active" id="mailboxStandardModeBtn" onclick="switchMailboxViewMode('standard')">标准模式</button>
+        <button class="mode-pill" id="mailboxCompactModeBtn" onclick="switchMailboxViewMode('compact')">简洁模式</button>
+      </div>
+      <button class="btn btn-sm btn-ghost" id="resetLayoutBtn" title="恢复默认三栏宽度与折叠状态" style="display:none">重置布局</button>
+      <button class="btn btn-sm btn-ghost" onclick="onRefresh()">刷新</button>
+    </div>
+  </div>
+
+  <!-- ── 标准三栏工作台 ── -->
+  <div class="mbx-workbench" id="standardView">
+    <div class="mbx-panel" data-panel="groups">
+      <div class="mbx-panel-head">
+        <span class="mbx-panel-title">分组</span>
+        <button class="mbx-collapse-btn" title="折叠分组面板">‹</button>
+      </div>
+      <div class="mbx-panel-body">
+        <ul class="mbx-group-list" id="groupList"></ul>
+      </div>
+    </div>
+    <div class="mbx-resizer" data-resizer="groups"></div>
+
+    <div class="mbx-panel" data-panel="accounts">
+      <div class="mbx-panel-head">
+        <span class="mbx-panel-title">账号</span>
+        <button class="mbx-collapse-btn" title="折叠账号面板">‹</button>
+      </div>
+      <div class="mbx-panel-body">
+        <div class="mbx-account-search">
+          <input type="text" id="accountSearch" placeholder="筛选账号（邮箱/备注）">
+        </div>
+        <div class="mbx-account-list" id="accountList"></div>
+      </div>
+    </div>
+    <div class="mbx-resizer" data-resizer="accounts"></div>
+
+    <div class="mbx-panel" data-panel="emails">
+      <div class="mbx-panel-head">
+        <span class="mbx-panel-title">邮件</span>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span id="listenDot" style="display:none"></span>
+          <button class="mbx-collapse-btn" title="折叠邮件面板">›</button>
+        </div>
+      </div>
+      <div class="mbx-panel-body" style="overflow:hidden">
+        <div class="mbx-email-work">
+          <div class="mbx-email-left">
+            <div class="mbx-email-toolbar">
+              <div class="mn-tabs" id="folderTabs" style="margin-bottom:0">
+                <button class="mn-tab active" data-folder="inbox">收件箱</button>
+                <button class="mn-tab" data-folder="junkemail">垃圾邮件</button>
+                <button class="mn-tab" data-folder="deleteditems">已删除</button>
+              </div>
+              <select id="readFilter">
+                <option value="all">全部</option>
+                <option value="unread">未读</option>
+                <option value="read">已读</option>
+              </select>
+              <input type="text" id="listSearch" placeholder="箱内搜索">
+            </div>
+            <div class="mbx-email-list" id="messageList"></div>
+          </div>
+          <div class="mbx-email-detail" id="detailPane"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── 简洁模式 ── -->
+  <div id="compactView" style="display:none">
+    <div class="mbx-compact-toolbar">
+      <div class="mn-tabs" id="compactGroupTabs" style="margin-bottom:0">
+        <button class="mn-tab active" data-group="all">全部</button>
+        <button class="mn-tab" data-group="healthy">健康</button>
+        <button class="mn-tab" data-group="unhealthy">异常</button>
+        <button class="mn-tab" data-group="dead">失效</button>
+        <button class="mn-tab" data-group="using">占用中</button>
+        <button class="mn-tab" data-group="unknown">未检测</button>
+      </div>
+      <div class="mbx-compact-search">
+        <input type="text" id="compactSearch" placeholder="搜索账号">
+      </div>
+    </div>
+    <div class="mbx-table-card">
+      <div class="mbx-table-head">
+        <span class="mbx-table-title">简洁账号列表<span class="mbx-table-sub" id="compactSummary"></span></span>
+        <div class="btn-row">
+          <button class="btn btn-sm btn-ghost" id="compactBatchDelete" disabled>删除选中</button>
+          <button class="btn btn-sm btn-ghost" onclick="clearCompactSelected()">清除选择</button>
+        </div>
+      </div>
+      <div class="mbx-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:44px"></th>
+              <th>邮箱</th>
+              <th>状态</th>
+              <th>标签 / 绑定</th>
+              <th>最近检测</th>
+              <th style="width:230px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="compactTableBody"></tbody>
+        </table>
+      </div>
+      <div class="mbx-empty" id="compactEmpty" style="display:none">当前分组暂无账号</div>
+    </div>
+  </div>
+</div>
+
+<!-- Device Code Flow 弹窗 -->
+<div id="deviceModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.5);z-index:9999;align-items:center;justify-content:center">
+  <div style="background:#fff;border-radius:8px;padding:24px;max-width:480px;width:90%;box-shadow:0 4px 24px rgba(0,0,0,.2)">
+    <div style="font-size:18px;font-weight:600;margin-bottom:16px">刷新 Token — Device Code Flow</div>
+    <div style="margin-bottom:12px;color:#666">请按以下步骤完成授权：</div>
+    <div style="margin-bottom:8px"><strong>1.</strong> 打开 <a id="dcUrl" href="#" target="_blank" style="color:#2563eb">Microsoft 设备登录</a></div>
+    <div style="margin-bottom:8px"><strong>2.</strong> 输入代码：<code id="dcCode" style="background:#f3f4f6;padding:2px 8px;border-radius:4px;font-size:16px;font-weight:bold;user-select:all">------</code></div>
+    <div style="margin-bottom:8px"><strong>3.</strong> 登录账号：<span id="dcEmail" style="font-weight:600"></span></div>
+    <div style="margin-bottom:16px"><strong>4.</strong> 同意授权后关闭此页面</div>
+    <div id="dcStatus" style="margin-bottom:12px;padding:8px;border-radius:4px;background:#fef3c7;color:#92400e;display:none"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn" onclick="closeDeviceModal()" style="background:#e5e7eb;color:#374151">关闭</button>
+      <button class="btn btn-success" id="dcPollBtn" onclick="pollDeviceFlow()">开始轮询</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const initialEmail = {{ selected_email|tojson }};
+const esc = v => { const el = document.createElement('div'); el.textContent = String(v ?? ''); return el.innerHTML; };
+// 用于 HTML 属性值（srcdoc="..."、title="..." 等）：esc 只转义 &<>，不处理引号，
+// 放进属性里会被正文中的 " 截断，必须再补上引号转义。
+const escAttr = v => esc(v).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const HEALTH_TEXT = { unknown:'未检测', healthy:'健康', unhealthy:'异常', dead:'失效' };
+const POOL_TEXT = { available:'可用', using:'占用中', retired:'已回收' };
+
+/* ── 状态（对齐 Plus：viewMode + 三栏布局持久化）── */
+const VIEW_MODE_KEY = 'mp_mailbox_view_mode';
+const LAYOUT_KEY = 'mp_mailbox_layout';
+const DEFAULT_WIDTHS = { groups: 200, accounts: 260, emails: 380 };
+const MIN_WIDTHS = { groups: 150, accounts: 180, emails: 280 };
+const MAX_WIDTHS = { groups: 400, accounts: 500, emails: 600 };
+const COLLAPSED_W = 36;
+
+function loadViewMode() { try { return localStorage.getItem(VIEW_MODE_KEY) === 'compact' ? 'compact' : 'standard'; } catch { return 'standard'; } }
+function saveViewMode(m) { try { localStorage.setItem(VIEW_MODE_KEY, m); } catch {} }
+function createDefaultLayout() {
+  return { groups: { width: 200, collapsed: false }, accounts: { width: 260, collapsed: false }, emails: { width: 380, collapsed: false } };
+}
+function loadLayout() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_KEY) || 'null');
+    if (!raw || !raw.panels) return createDefaultLayout();
+    const out = createDefaultLayout();
+    for (const k of ['groups', 'accounts', 'emails']) {
+      if (raw.panels[k]) {
+        out[k] = { width: clampW(k, raw.panels[k].width), collapsed: !!raw.panels[k].collapsed };
+      }
+    }
+    return out;
+  } catch { return createDefaultLayout(); }
+}
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ panels: layout })); } catch {}
+}
+function clampW(panel, w) {
+  const n = Math.round(Number(w) || DEFAULT_WIDTHS[panel]);
+  return Math.min(MAX_WIDTHS[panel], Math.max(MIN_WIDTHS[panel], n));
+}
+function buildGridTemplate() {
+  const col = p => layout[p].collapsed ? COLLAPSED_W + 'px' : layout[p].width + 'px';
+  const emails = layout.emails.collapsed ? COLLAPSED_W + 'px' : 'minmax(' + layout.emails.width + 'px, 1fr)';
+  return col('groups') + ' 6px ' + col('accounts') + ' 6px ' + emails;
+}
+
+/* ── 数据 ── */
+let accounts = [];
+let counts = { total: 0, healthy: 0, unhealthy: 0, unknown: 0, dead: 0, using: 0 };
+let groupFilter = 'all';
+let accountSearch = '';
+let compactSearch = '';
+let compactGroupFilter = 'all';
+
+let viewMode = loadViewMode();
+let layout = loadLayout();
+let _currentAccount = initialEmail || null;      // 当前选中邮箱
+let _folder = 'inbox';
+let _readFilter = 'all';
+let _listSearch = '';
+let _emails = [];
+let _top = 20;
+let _detail = null;
+let _lastVerification = null;
+let _trusted = false;
+let _compactSelected = new Set();
+let _listenTimer = null;
+let _knownMsgIds = new Set();
+let _dcAccountId = null;
+let _dcPollTimer = null;
+
+const $ = id => document.getElementById(id);
+
+/* ── 初始化 ── */
+function init() {
+  setupViewMode();
+  setupLayout();
+  setupFolderTabs();
+  renderGroups();
+  $('accountSearch').addEventListener('input', e => { accountSearch = e.target.value.trim().toLowerCase(); renderAccountList(); });
+  $('compactSearch').addEventListener('input', e => { compactSearch = e.target.value.trim().toLowerCase(); renderCompact(); });
+  $('readFilter').addEventListener('change', e => { _readFilter = e.target.value; renderMessages(); });
+  $('listSearch').addEventListener('input', e => { _listSearch = e.target.value.trim().toLowerCase(); renderMessages(); });
+  initResizers();
+  loadAccounts();
+}
+
+function setupViewMode() {
+  applyViewMode(viewMode);
+  $('resetLayoutBtn').addEventListener('click', () => {
+    layout = createDefaultLayout();
+    saveLayout();
+    applyLayout();
+    toast('已恢复默认三栏宽度与折叠状态');
+  });
+}
+
+/* 照抄 Outlook Email Plus：switchMailboxViewMode + mode-pill 胶囊，localStorage 持久化 */
+function switchMailboxViewMode(mode) {
+  viewMode = mode === 'compact' ? 'compact' : 'standard';
+  saveViewMode(viewMode);
+  applyViewMode(viewMode);
+}
+
+function applyViewMode(mode) {
+  $('mailboxStandardModeBtn').classList.toggle('active', mode === 'standard');
+  $('mailboxCompactModeBtn').classList.toggle('active', mode === 'compact');
+  $('standardView').style.display = mode === 'standard' ? '' : 'none';
+  $('compactView').style.display = mode === 'compact' ? '' : 'none';
+  $('resetLayoutBtn').style.display = mode === 'standard' ? '' : 'none';
+  $('pageSub').textContent = mode === 'standard' ? '管理邮箱账号与查看邮件' : '按分组查看账号摘要与验证码';
+  if (mode === 'standard') { applyLayout(); renderAccountList(); if (_currentAccount) loadMessages(); }
+  else { renderCompact(); }
+}
+
+/* ── 三栏布局：折叠 + 拖拽 ── */
+function setupLayout() {
+  applyLayout();
+  document.querySelectorAll('.mbx-collapse-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const panel = btn.closest('.mbx-panel').dataset.panel;
+      layout[panel].collapsed = !layout[panel].collapsed;
+      saveLayout(); applyLayout();
+    });
+  });
+}
+function applyLayout() {
+  $('standardView').style.gridTemplateColumns = buildGridTemplate();
+  document.querySelectorAll('.mbx-panel').forEach(p => {
+    const key = p.dataset.panel;
+    const head = p.querySelector('.mbx-panel-head');
+    const body = p.querySelector('.mbx-panel-body');
+    const btn = p.querySelector('.mbx-collapse-btn');
+    head.classList.toggle('collapsed', layout[key].collapsed);
+    body.style.display = layout[key].collapsed ? 'none' : '';
+    btn.textContent = layout[key].collapsed ? '›' : (key === 'emails' ? '›' : '‹');
+    btn.title = layout[key].collapsed ? '展开面板' : '折叠面板';
+  });
+}
+function initResizers() {
+  let drag = null;
+  document.querySelectorAll('.mbx-resizer').forEach(rz => {
+    rz.addEventListener('mousedown', e => {
+      e.preventDefault();
+      const panel = rz.dataset.resizer;
+      if (layout[panel].collapsed) return;
+      drag = { panel, startX: e.clientX, startWidth: layout[panel].width };
+      rz.classList.add('dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+  });
+  document.addEventListener('mousemove', e => {
+    if (!drag) return;
+    layout[drag.panel].width = clampW(drag.panel, drag.startWidth + (e.clientX - drag.startX));
+    applyLayout();
+  });
+  document.addEventListener('mouseup', () => {
+    if (!drag) return;
+    drag = null;
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.querySelectorAll('.mbx-resizer').forEach(r => r.classList.remove('dragging'));
+    saveLayout();
+  });
+}
+
+/* ── 分组 ── */
+const GROUP_DEFS = [
+  { key: 'all', label: '全部账号', color: '#6e7178', countKey: 'total' },
+  { key: 'healthy', label: '健康', color: '#16a34a', countKey: 'healthy' },
+  { key: 'unhealthy', label: '异常', color: '#d97706', countKey: 'unhealthy' },
+  { key: 'unknown', label: '未检测', color: '#9ca3af', countKey: 'unknown' },
+  { key: 'dead', label: '失效', color: '#dc2626', countKey: 'dead' },
+  { key: 'using', label: '占用中', color: '#2563eb', countKey: 'using' },
+];
+function renderGroups() {
+  const list = $('groupList');
+  list.innerHTML = GROUP_DEFS.map(g =>
+    '<li class="mbx-group-item' + (groupFilter === g.key ? ' active' : '') + '" data-group="' + g.key + '" onclick="setGroup(\'' + g.key + '\', this)">' +
+      '<span class="mbx-group-dot" style="background:' + g.color + '"></span>' +
+      '<span>' + g.label + '</span>' +
+      '<span class="mbx-group-count">' + (counts[g.countKey] || 0) + '</span>' +
+    '</li>'
+  ).join('');
+}
+function setGroup(key, el) {
+  groupFilter = key;
+  document.querySelectorAll('.mbx-group-item').forEach(i => i.classList.toggle('active', i.dataset.group === key));
+  renderAccountList();
+}
+
+/* ── 账号 ── */
+async function loadAccounts() {
+  try {
+    const q = new URLSearchParams({ provider: 'outlook', limit: '500' });
+    const r = await api('/api/admin/emails?' + q);
+    accounts = r.data.accounts || [];
+    const c = r.data.counts || {};
+    counts = { total: c.total || 0, healthy: c.healthy || 0, unhealthy: c.unhealthy || 0, unknown: c.unknown || 0, dead: c.dead || 0, using: c.using || 0 };
+    renderGroups();
+    renderAccountList();
+    if (viewMode === 'compact') renderCompact();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function healthClass(h) {
+  const hs = h || 'unknown';
+  return hs === 'healthy' ? 'ok' : hs === 'unhealthy' ? 'warn' : hs === 'dead' ? 'dead' : '';
+}
+
+function filteredAccounts() {
+  let list = accounts;
+  if (groupFilter === 'healthy' || groupFilter === 'unhealthy' || groupFilter === 'unknown' || groupFilter === 'dead') {
+    list = list.filter(a => (a.health_status || 'unknown') === groupFilter);
+  } else if (groupFilter === 'using') {
+    list = list.filter(a => (a.pool_status || (a.status === 'using' ? 'using' : 'available')) === 'using');
+  }
+  if (accountSearch) {
+    list = list.filter(a => (a.email + ' ' + (a.remark || '')).toLowerCase().includes(accountSearch));
+  }
+  return list;
+}
+
+function copyText(text) {
+  return new Promise(resolve => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => resolve(true)).catch(() => resolve(false));
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.top = '-9999px';
+      document.body.appendChild(ta); ta.select();
+      try { resolve(document.execCommand('copy')); } catch { resolve(false); }
+      document.body.removeChild(ta);
+    }
+  });
+}
+
+async function copyAccountEmail(email) {
+  const ok = await copyText(email);
+  toast(ok ? '邮箱地址已复制' : '复制失败，请手动复制', ok ? 'success' : 'error');
+}
+
+function renderAccountList() {
+  const box = $('accountList');
+  if (viewMode !== 'standard') return;
+  const list = filteredAccounts();
+  if (!list.length) {
+    box.innerHTML = '<div class="mbx-empty" style="padding:24px 8px">暂无账号</div>';
+    return;
+  }
+  box.innerHTML = list.map(a => {
+    const hs = a.health_status || 'unknown';
+    const ps = a.pool_status || (a.status === 'using' ? 'using' : 'available');
+    const isRisk = a.health_reason === 'risk_control' || (a.check_result || '').toLowerCase().indexOf('service abuse') >= 0;
+    const isCred = a.health_reason === 'credential' || (a.check_result || '').indexOf('invalid_grant') >= 0;
+    const meta = [
+      a.used_by ? '绑定 ' + esc(a.used_by) : '',
+      a.last_check_at ? '检测 ' + a.last_check_at.replace('T', ' ').slice(0, 16) : '未检测',
+    ].filter(Boolean).join(' · ');
+    const remark = a.remark ? '<div class="mbx-account-meta">📝 ' + esc(a.remark) + '</div>' : '';
+    return '<div class="mbx-account-card' + (_currentAccount === a.email ? ' active' : '') + '" onclick="selectAccount(\'' + esc(a.email) + '\')">' +
+      '<span class="mbx-account-email" title="点击复制邮箱地址" onclick="event.stopPropagation();copyAccountEmail(\'' + esc(a.email) + '\')">' + esc(a.email) + '</span>' +
+      '<div class="mbx-tags">' +
+        '<span class="mbx-tag">OUTLOOK</span>' +
+        '<span class="mbx-tag ' + healthClass(hs) + '">' + HEALTH_TEXT[hs] + '</span>' +
+        '<span class="mbx-tag ' + (ps === 'using' ? 'warn' : 'ok') + '">' + (POOL_TEXT[ps] || ps) + '</span>' +
+      '</div>' + remark +
+      (meta ? '<div class="mbx-account-meta">🕐 ' + meta + '</div>' : '') +
+      '<div class="mbx-account-actions" onclick="event.stopPropagation()">' +
+        '<span class="mbx-tag">' + (isRisk ? '风控' : isCred ? '凭证失效' : (a.health_reason || '—')) + '</span>' +
+        '<span class="btn-row" style="gap:4px">' +
+          (isCred ? '<button class="btn btn-sm" onclick="startRefreshToken(' + a.id + ',\'' + esc(a.email) + '\')">刷新 Token</button>' : '') +
+          (isRisk ? '<button class="btn btn-sm btn-danger" onclick="deleteAccount(' + a.id + ',\'' + esc(a.email) + '\')">删除</button>' : '') +
+          '<button class="btn btn-sm" onclick="selectAccount(\'' + esc(a.email) + '\')">打开邮件</button>' +
+        '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function selectAccount(email) {
+  if (_currentAccount === email) { loadMessages(); return; }
+  _currentAccount = email;
+  _top = 20;
+  _emails = [];
+  _detail = null;
+  _lastVerification = null;
+  _trusted = false;
+  _knownMsgIds = new Set();
+  renderAccountList();
+  loadMessages();
+}
+
+/* ── 文件夹 / 邮件 ── */
+function setupFolderTabs() {
+  document.querySelectorAll('#folderTabs .mn-tab').forEach(t => {
+    t.addEventListener('click', () => {
+      const f = t.dataset.folder;
+      if (f === _folder) return;
+      _folder = f;
+      _top = 20;
+      _emails = [];
+      _detail = null;
+      document.querySelectorAll('#folderTabs .mn-tab').forEach(x => x.classList.toggle('active', x.dataset.folder === f));
+      renderMessages();
+      loadMessages();
+    });
+  });
+}
+
+async function loadMessages() {
+  if (!_currentAccount) return;
+  const box = $('messageList');
+  box.innerHTML = '<div class="mbx-empty" style="padding:24px">加载中…</div>';
+  try {
+    const r = await api('/api/admin/mailbox/messages?email=' + encodeURIComponent(_currentAccount) + '&folder=' + encodeURIComponent(_folder) + '&top=' + _top);
+    _emails = r.data || [];
+    _emails.forEach(m => _knownMsgIds.add(m.id));
+    renderMessages();
+  } catch (e) {
+    box.innerHTML = '<div class="mbx-empty" style="padding:24px">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function filteredMessages() {
+  let list = _emails;
+  if (_readFilter === 'unread') list = list.filter(m => !m.isRead);
+  else if (_readFilter === 'read') list = list.filter(m => m.isRead);
+  if (_listSearch) {
+    list = list.filter(m => ((m.subject || '') + ' ' + ((m.from || {}).emailAddress || {}).address + ' ' + (m.bodyPreview || '')).toLowerCase().includes(_listSearch));
+  }
+  return list;
+}
+
+function renderMessages() {
+  const box = $('messageList');
+  if (!_currentAccount) {
+    box.innerHTML = '<div class="mbx-empty" style="padding:24px">请先在左侧选择账号</div>';
+    return;
+  }
+  const list = filteredMessages();
+  if (!list.length) {
+    box.innerHTML = '<div class="mbx-empty" style="padding:24px">暂无邮件</div>';
+    return;
+  }
+  box.innerHTML = list.map(m => {
+    const from = ((m.from || {}).emailAddress || {}).address || '';
+    const date = m.receivedDateTime ? new Date(m.receivedDateTime).toLocaleString('zh-CN') : '';
+    return '<div class="mbx-msg-item' + (!m.isRead ? ' unread' : '') + '" data-id="' + esc(m.id) + '" onclick="openMessage(\'' + esc(m.id) + '\')">' +
+      '<div class="mbx-msg-subject">' + esc(m.subject || '(无主题)') + '</div>' +
+      '<div class="mbx-msg-from">' + esc(from) + '</div>' +
+      '<div class="mbx-msg-meta"><span>' + esc(m.bodyPreview || '') + '</span><span>' + esc(date) + '</span></div>' +
+    '</div>';
+  }).join('') +
+  (_emails.length >= _top ? '<div class="mbx-msg-loadmore"><button class="btn btn-sm btn-ghost" onclick="loadMore()">加载更多</button></div>' : '');
+}
+
+async function loadMore() {
+  _top += 20;
+  await loadMessages();
+}
+
+async function openMessage(messageId) {
+  if (!_currentAccount) return;
+  document.querySelectorAll('.mbx-msg-item').forEach(el => el.classList.toggle('active', el.dataset.id === messageId));
+  const pane = $('detailPane');
+  pane.innerHTML = '<div class="mbx-empty" style="padding:40px 0">加载邮件详情…</div>';
+  try {
+    const r = await api('/api/admin/mailbox/message?email=' + encodeURIComponent(_currentAccount) + '&message_id=' + encodeURIComponent(messageId));
+    const d = r.data || {};
+    const from = ((d.from || {}).emailAddress || {}).address || '';
+    const to = (d.toRecipients || []).map(t => ((t.emailAddress || {}).address || '')).filter(Boolean).join(', ');
+    const date = d.receivedDateTime ? new Date(d.receivedDateTime).toLocaleString('zh-CN') : '';
+    const body = (d.body && d.body.content) || d.bodyPreview || '';
+    _detail = { id: d.id, message: { subject: d.subject, body_preview: d.bodyPreview || '', body: (d.body || {}).content || '', text: '', from: from }, subject: d.subject, from: from, to: to, date: date, body: body, bodyType: (d.body || {}).contentType || 'html' };
+    renderDetail();
+  } catch (e) {
+    pane.innerHTML = '<div class="mbx-empty" style="padding:40px 0">' + esc(e.message) + '</div>';
+  }
+}
+
+function buildBodyHtml() {
+  if (!_detail) return '';
+  const { body, bodyType } = _detail;
+  if (!body) return '';
+  const src = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;margin:0;padding:0;color:#111827;line-height:1.6}img{max-width:100%;height:auto}a{color:#2563eb}</style></head><body>' + body + '</body></html>';
+  return src;
+}
+
+function renderDetail() {
+  const pane = $('detailPane');
+  if (!_detail) {
+    pane.innerHTML = '<div class="mbx-empty" style="padding:48px 0">选择一封邮件查看详情</div>';
+    return;
+  }
+  pane.innerHTML =
+    '<div style="font-weight:600;font-size:15px">' + esc(_detail.subject || '(无主题)') + '</div>' +
+    '<div class="mbx-detail-meta" style="margin-top:6px">' +
+      '<div>发件人：' + esc(_detail.from || '--') + '</div>' +
+      (_detail.to ? '<div>收件人：' + esc(_detail.to) + '</div>' : '') +
+      '<div>时间：' + esc(_detail.date || '--') + '</div>' +
+    '</div>' +
+    '<div class="mbx-detail-actions">' +
+      '<button class="btn btn-sm" onclick="extractVerification()">🔑 提取并复制验证码</button>' +
+      '<button class="btn btn-sm btn-ghost" onclick="toggleListen()" id="listenBtn">开始监听</button>' +
+      '<label class="trust-row" style="cursor:pointer">信任原始 HTML <span class="toggle"><input type="checkbox" id="trustSwitch" onchange="onToggleTrust(this.checked)"><span class="toggle-slider"></span></span></label>' +
+    '</div>' +
+    '<div class="mbx-detail-alert" id="detailAlert"></div>' +
+    '<div style="border-top:1px solid #f1f2f4;padding-top:12px"><iframe title="email-body" sandbox="allow-same-origin" srcdoc="' + escAttr(buildBodyHtml()) + '" style="width:100%;min-height:420px;border:none;background:#fff"></iframe></div>';
+  if (_lastVerification) showAlert('最近提取结果：' + esc(_lastVerification), false);
+  const sw = $('trustSwitch'); if (sw) sw.checked = _trusted;
+}
+
+function onToggleTrust(checked) {
+  if (checked && !confirm('信任模式将直接显示邮件原始 HTML（仍保留 iframe 沙箱），可能包含不安全内容。确定继续？')) {
+    const sw = $('trustSwitch'); if (sw) sw.checked = false;
+    return;
+  }
+  _trusted = checked;
+  if (_detail) renderDetail();
+}
+
+function showAlert(text, isError) {
+  const el = $('detailAlert');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'mbx-detail-alert show' + (isError ? ' error' : '');
+}
+
+/* ── 提取验证码 ── */
+async function extractVerification() {
+  if (!_detail || !_currentAccount) { toast('请先选择邮件', 'error'); return; }
+  try {
+    const r = await api('/api/admin/mailbox/ai-code', {
+      method: 'POST',
+      body: JSON.stringify({ email: _currentAccount, message: _detail.message, use_ai: true }),
+    });
+    const d = r.data || {};
+    const code = d.verification_code || '';
+    if (!code) { showAlert('未提取到验证码或链接', true); toast('未提取到验证码', 'error'); return; }
+    _lastVerification = code;
+    const ok = await copyText(code);
+    showAlert('最近提取结果：' + code, false);
+    toast(ok ? '已复制: ' + code : '验证码: ' + code, ok ? 'success' : '');
+  } catch (e) { showAlert(esc(e.message), true); }
+}
+
+/* 简洁模式：对某账号一键提取最新验证码 */
+async function extractCodeFor(email) {
+  try {
+    const r = await api('/api/admin/mailbox/messages?email=' + encodeURIComponent(email) + '&folder=inbox&top=1');
+    const msgs = r.data || [];
+    if (!msgs.length) { toast('暂无邮件，无法提取', 'error'); return; }
+    const m = msgs[0];
+    const msg = { subject: m.subject, body_preview: m.bodyPreview || '', body: '', text: '', from: ((m.from || {}).emailAddress || {}).address || '' };
+    const re = await api('/api/admin/mailbox/ai-code', { method: 'POST', body: JSON.stringify({ email: email, message: msg, use_ai: true }) });
+    const code = (re.data || {}).verification_code || '';
+    if (!code) { toast('未提取到验证码或链接', 'error'); return; }
+    const ok = await copyText(code);
+    toast(ok ? '已复制: ' + code : '验证码: ' + code, ok ? 'success' : '');
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+/* ── 监听（前端轮询新邮件，收到即自动提取验证码）── */
+function toggleListen() {
+  if (_listenTimer) { stopListen(); return; }
+  if (!_currentAccount) { toast('请先选择账号', 'error'); return; }
+  _knownMsgIds = new Set(_emails.map(m => m.id));
+  _listenTimer = setInterval(pollOnce, 15000);
+  const btn = $('listenBtn'); if (btn) { btn.textContent = '停止监听'; btn.classList.add('btn-danger'); }
+  const dot = $('listenDot'); dot.style.display = 'inline-block'; dot.innerHTML = '<span class="mbx-tag ok">监听中</span>';
+  toast('已开始监听 ' + _currentAccount + ' 的新邮件');
+  pollOnce();
+}
+function stopListen() {
+  if (_listenTimer) { clearInterval(_listenTimer); _listenTimer = null; }
+  const btn = $('listenBtn'); if (btn) { btn.textContent = '开始监听'; btn.classList.remove('btn-danger'); }
+  const dot = $('listenDot'); dot.style.display = 'none';
+  toast('已停止监听');
+}
+async function pollOnce() {
+  if (!_currentAccount) return;
+  try {
+    const r = await api('/api/admin/mailbox/messages?email=' + encodeURIComponent(_currentAccount) + '&folder=inbox&top=10');
+    const msgs = r.data || [];
+    const newest = msgs[0];
+    if (newest && !_knownMsgIds.has(newest.id)) {
+      toast('📩 收到新邮件：' + (newest.subject || '(无主题)'));
+      _knownMsgIds.add(newest.id);
+      const msg = { subject: newest.subject, body_preview: newest.bodyPreview || '', body: '', text: '', from: ((newest.from || {}).emailAddress || {}).address || '' };
+      const re = await api('/api/admin/mailbox/ai-code', { method: 'POST', body: JSON.stringify({ email: _currentAccount, message: msg, use_ai: true }) });
+      const code = (re.data || {}).verification_code || '';
+      if (code) {
+        _lastVerification = code;
+        const ok = await copyText(code);
+        toast(ok ? '🔑 验证码已复制: ' + code : '🔑 验证码: ' + code, 'success');
+        if (_detail) renderDetail();
+        stopListen();
+      }
+    }
+  } catch (e) { /* 忽略轮询错误 */ }
+}
+
+/* ── 简洁模式 ── */
+function compactFiltered() {
+  let list = accounts;
+  const f = compactGroupFilter;
+  if (f === 'healthy' || f === 'unhealthy' || f === 'unknown' || f === 'dead') {
+    list = list.filter(a => (a.health_status || 'unknown') === f);
+  } else if (f === 'using') {
+    list = list.filter(a => (a.pool_status || (a.status === 'using' ? 'using' : 'available')) === 'using');
+  }
+  if (compactSearch) list = list.filter(a => (a.email + ' ' + (a.remark || '')).toLowerCase().includes(compactSearch));
+  return list;
+}
+
+function renderCompact() {
+  const list = compactFiltered();
+  const body = $('compactTableBody');
+  $('compactSummary').textContent = list.length + ' 个账号' + (_compactSelected.size ? ' · 已选 ' + _compactSelected.size : '');
+  if (!list.length) {
+    body.innerHTML = '';
+    $('compactEmpty').style.display = 'block';
+    return;
+  }
+  $('compactEmpty').style.display = 'none';
+  body.innerHTML = list.map(a => {
+    const hs = a.health_status || 'unknown';
+    const ps = a.pool_status || (a.status === 'using' ? 'using' : 'available');
+    const isRisk = a.health_reason === 'risk_control' || (a.check_result || '').toLowerCase().indexOf('service abuse') >= 0;
+    const isCred = a.health_reason === 'credential' || (a.check_result || '').indexOf('invalid_grant') >= 0;
+    const tags = (a.tags || '').split(',').map(t => t.trim()).filter(Boolean);
+    return '<tr data-id="' + a.id + '">' +
+      '<td><input type="checkbox" class="mbx-row-check" data-id="' + a.id + '" ' + (_compactSelected.has(a.id) ? 'checked' : '') + '></td>' +
+      '<td><div style="font-weight:600;word-break:break-all">' + esc(a.email) + '</div><div class="mbx-tags"><span class="mbx-tag">OUTLOOK</span><span class="mbx-tag ' + healthClass(hs) + '">' + HEALTH_TEXT[hs] + '</span><span class="mbx-tag ' + (ps === 'using' ? 'warn' : 'ok') + '">' + (POOL_TEXT[ps] || ps) + '</span></div></td>' +
+      '<td>' + (isRisk ? '<span class="mbx-tag dead">风控</span>' : isCred ? '<span class="mbx-tag warn">凭证失效</span>' : '<span class="mbx-tag">' + esc(a.health_reason || '正常') + '</span>') + (a.fail_count ? '<div style="font-size:11px;color:#9ca3af;margin-top:2px">失败 ' + a.fail_count + ' 次</div>' : '') + '</td>' +
+      '<td>' + (tags.map(t => '<span class="mbx-tag">' + esc(t) + '</span>').join('') || '<span class="mbx-tag">—</span>') + (a.used_by ? '<div style="font-size:11px;color:#9ca3af;margin-top:2px">绑定 ' + esc(a.used_by) + '</div>' : '') + (a.remark ? '<div style="font-size:11px;color:#9ca3af;margin-top:2px">📝 ' + esc(a.remark) + '</div>' : '') + '</td>' +
+      '<td class="mono" style="font-size:12px">' + (a.last_check_at ? a.last_check_at.replace('T', ' ').slice(0, 16) : '—') + '</td>' +
+      '<td><span class="btn-row" style="gap:4px">' +
+        '<button class="btn btn-sm" onclick="extractCodeFor(\'' + esc(a.email) + '\')">验证码</button>' +
+        '<button class="btn btn-sm" onclick="openCompact(\'' + esc(a.email) + '\')">打开</button>' +
+        (isCred ? '<button class="btn btn-sm btn-ghost" onclick="startRefreshToken(' + a.id + ',\'' + esc(a.email) + '\')">刷新Token</button>' : '') +
+        '<button class="btn btn-sm btn-danger" onclick="deleteAccount(' + a.id + ',\'' + esc(a.email) + '\')">删除</button>' +
+      '</span></td>' +
+    '</tr>';
+  }).join('');
+  bindCompactChecks();
+}
+
+function bindCompactChecks() {
+  document.querySelectorAll('.mbx-row-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const id = Number(cb.dataset.id);
+      if (cb.checked) _compactSelected.add(id); else _compactSelected.delete(id);
+      renderCompactSummary();
+      $('compactBatchDelete').disabled = !_compactSelected.size;
+    });
+  });
+  $('compactBatchDelete').onclick = batchDeleteSelected;
+  $('compactBatchDelete').disabled = !_compactSelected.size;
+}
+function renderCompactSummary() {
+  $('compactSummary').textContent = compactFiltered().length + ' 个账号' + (_compactSelected.size ? ' · 已选 ' + _compactSelected.size : '');
+}
+function clearCompactSelected() { _compactSelected.clear(); renderCompact(); }
+function openCompact(email) {
+  viewMode = 'standard';
+  saveViewMode('standard');
+  applyViewMode('standard');
+  selectAccount(email);
+  window.scrollTo({ top: 0 });
+}
+async function batchDeleteSelected() {
+  const ids = Array.from(_compactSelected);
+  if (!ids.length) return;
+  if (!confirm('确认永久删除选中的 ' + ids.length + ' 个账号？')) return;
+  let okCount = 0, failCount = 0;
+  for (const id of ids) {
+    try { await api('/api/admin/emails/' + id, { method: 'DELETE' }); okCount++; } catch { failCount++; }
+  }
+  toast('已删除 ' + okCount + ' 个，失败 ' + failCount + ' 个', failCount ? 'error' : 'success');
+  _compactSelected.clear();
+  await loadAccounts();
+}
+
+/* ── 账号操作 ── */
+async function deleteAccount(accountId, email) {
+  if (!confirm('确定要删除账号 ' + email + ' 吗？')) return;
+  try {
+    await api('/api/admin/emails/' + accountId, { method: 'DELETE' });
+    toast('账号已删除', 'success');
+    if (_currentAccount === email) { _currentAccount = null; _emails = []; _detail = null; renderMessages(); if (viewMode === 'standard') renderAccountList(); }
+    await loadAccounts();
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function startRefreshToken(accountId, email) {
+  try {
+    const r = await api('/api/admin/emails/' + accountId + '/refresh-token', { method: 'POST' });
+    _dcAccountId = accountId;
+    $('dcUrl').href = r.data.verification_uri;
+    $('dcUrl').textContent = r.data.verification_uri;
+    $('dcCode').textContent = r.data.user_code;
+    $('dcEmail').textContent = email;
+    $('dcStatus').style.display = 'none';
+    $('dcPollBtn').textContent = '轮询中…';
+    $('deviceModal').style.display = 'flex';
+    window.open(r.data.verification_uri, '_blank');
+    setTimeout(pollDeviceFlow, 1000);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+async function pollDeviceFlow() {
+  if (!_dcAccountId) return;
+  const btn = $('dcPollBtn');
+  const st = $('dcStatus');
+  btn.textContent = '轮询中…';
+  btn.disabled = true;
+  st.style.display = 'block';
+  st.style.background = '#fef3c7';
+  st.style.color = '#92400e';
+  st.textContent = '等待授权中…';
+  _dcPollTimer = setInterval(async () => {
+    try {
+      const r = await api('/api/admin/emails/' + _dcAccountId + '/refresh-token/status');
+      const d = r.data;
+      if (d.status === 'success') {
+        st.style.background = '#d1fae5';
+        st.style.color = '#065f46';
+        st.textContent = 'Token 刷新成功！';
+        btn.textContent = '完成';
+        btn.disabled = false;
+        btn.onclick = () => { closeDeviceModal(); loadAccounts(); };
+        clearInterval(_dcPollTimer);
+        toast('Token 刷新成功', 'success');
+      } else if (d.status === 'declined' || d.status === 'expired' || d.status === 'error') {
+        st.style.background = '#fee2e2';
+        st.style.color = '#991b1b';
+        st.textContent = d.message;
+        btn.textContent = '重试';
+        btn.disabled = false;
+        btn.onclick = pollDeviceFlow;
+        clearInterval(_dcPollTimer);
+      } else {
+        st.textContent = d.message || '等待授权中…';
+      }
+    } catch (e) {
+      st.style.background = '#fee2e2';
+      st.style.color = '#991b1b';
+      st.textContent = e.message;
+      btn.textContent = '重试';
+      btn.disabled = false;
+      clearInterval(_dcPollTimer);
+    }
+  }, 3000);
+}
+
+function closeDeviceModal() {
+  if (_dcPollTimer) clearInterval(_dcPollTimer);
+  $('deviceModal').style.display = 'none';
+  _dcAccountId = null;
+}
+
+/* ── 全局刷新 ── */
+async function onRefresh() {
+  await loadAccounts();
+  if (viewMode === 'compact') renderCompact();
+  else if (_currentAccount) loadMessages();
+  toast('已刷新', 'success');
+}
+
+/* ── 简洁模式分组切换 ── */
+document.querySelectorAll('#compactGroupTabs .mn-tab').forEach(t => {
+  t.addEventListener('click', () => {
+    compactGroupFilter = t.dataset.group;
+    document.querySelectorAll('#compactGroupTabs .mn-tab').forEach(x => x.classList.toggle('active', x.dataset.group === t.dataset.group));
+    renderCompact();
+  });
+});
+
+init();
+</script>
+{% endblock %}

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block doc_title_block %}MailPool{% endblock %} · MailPool 开发文档</title>
+    <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    {% block doc_head %}{% endblock %}
+</head>
+<body>
+<header class="topbar">
+    <div class="topbar-inner">
+        <a href="/docs/quick-start" class="brand"><img class="brand-mark" src="/static/img/logo.svg" alt="MailPool"> MailPool<span class="brand-sub">开发文档</span></a>
+        <nav class="nav">
+            <a href="/docs/quick-start" class="nav-item {% if doc_active == 'quick-start' %}active{% endif %}">快速开始</a>
+            <a href="/docs/temporary-email" class="nav-item {% if doc_active == 'temporary' %}active{% endif %}">临时邮箱</a>
+            <a href="/docs/api-overview" class="nav-item {% if doc_active == 'api' %}active{% endif %}">API 文档</a>
+            <a href="/docs/errors" class="nav-item {% if doc_active == 'errors' %}active{% endif %}">错误码</a>
+        </nav>
+        <div class="topbar-right">
+            <a href="/" class="btn btn-ghost btn-sm">返回控制台</a>
+        </div>
+    </div>
+</header>
+<div class="docs-layout">
+    <aside class="docs-sidebar">
+        <div class="docs-group">开始使用</div>
+        <a href="/docs/quick-start" class="docs-link {% if doc_active == 'quick-start' %}active{% endif %}">快速开始</a>
+        <a href="/docs/temporary-email" class="docs-link {% if doc_active == 'temporary' %}active{% endif %}">临时邮箱</a>
+        <div class="docs-group">开发文档</div>
+        <a href="/docs/api-overview" class="docs-link {% if doc_active == 'api' %}active{% endif %}">API 文档</a>
+        <a href="/docs/errors" class="docs-link {% if doc_active == 'errors' %}active{% endif %}">错误码</a>
+    </aside>
+    <main class="docs-content">
+        <h1 class="page-title">{{ doc_title }}</h1>
+        {% block doc_content %}{% endblock %}
+    </main>
+</div>
+{% block doc_scripts %}{% endblock %}
+</body>
+</html>

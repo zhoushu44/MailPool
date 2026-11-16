@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}下单流水{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">下单流水</div>
+        <div class="page-sub">按邮箱汇总的取号记录（未接入计费，取号完全免费）</div>
+    </div>
+    <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+</div>
+
+<div class="card">
+    <form method="get" class="mn-filter-row">
+        <div>
+            <label>项目</label>
+            <select name="project_code">
+                <option value="">全部</option>
+                {% for p in projects %}
+                <option value="{{ p.code }}" {% if filter_project == p.code %}selected{% endif %}>{{ p.code }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div style="display:flex;align-items:flex-end"><button type="submit" class="btn">筛选</button></div>
+    </form>
+</div>
+
+<div class="mn-table-card">
+    {% if rows %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th style="width:48px">序号</th>
+                <th>邮箱</th>
+                <th>邮箱类型</th>
+                <th>项目名称</th>
+                <th>项目编码</th>
+                <th>邮箱状态</th>
+                <th>获取时间</th>
+                <th>最新收件</th>
+            </tr></thead>
+            <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="mono">{{ (page - 1) * page_size + loop.index }}</td>
+                <td><a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}&project_code={{ r.project_code|urlencode }}">{{ r.email }}</a></td>
+                <td><span class="badge badge-temp">临时</span></td>
+                <td>{{ r.project_name }}</td>
+                <td class="mono">{{ r.project_code }}</td>
+                <td>
+                    {% if r.pooled %}
+                        {% if r.account_status == 'using' %}<span class="badge badge-using">占用中</span>
+                        {% elif r.account_status == 'dead' %}<span class="badge badge-dead">失效</span>
+                        {% else %}<span class="badge badge-available">可用</span>{% endif %}
+                    {% else %}
+                        <span class="badge badge-temp">临时</span>
+                    {% endif %}
+                </td>
+                <td class="mono" style="white-space:nowrap">{{ r.first_used_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td>
+                    {% if r.code %}<span class="badge badge-code">{{ r.code }}</span>
+                    {% elif r.last_received_at %}<span class="mono">{{ r.last_received_at.strftime('%m-%d %H:%M') }}</span>
+                    {% else %}-{% endif %}
+                    {% if r.mail_count %}<span class="mn-count">{{ r.mail_count }}封</span>{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="mn-pager">
+        <span>每页 {{ page_size }} 条 · 共 {{ total }} 条记录</span>
+        <div class="btn-row">
+            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/orders?page={{ page - 1 }}&page_size={{ page_size }}{% if filter_project %}&project_code={{ filter_project }}{% endif %}">上一页</a>{% endif %}
+            <span class="mn-pager-info">第 {{ page }} 页 / 共 {{ total_pages }} 页</span>
+            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/orders?page={{ page + 1 }}&page_size={{ page_size }}{% if filter_project %}&project_code={{ filter_project }}{% endif %}">下一页</a>{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty">暂无下单流水，可到「购买邮箱」商城取号</div>
+    {% endif %}
+</div>
+{% endblock %}

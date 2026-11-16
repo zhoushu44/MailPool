@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}购买邮箱{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">购买邮箱</div>
+        <div class="page-sub">选择临时邮箱或独占邮箱进行购买</div>
+    </div>
+</div>
+
+<div class="mn-tabs">
+    <button type="button" class="mn-tab active" onclick="switchTab('temp', this)">临时邮箱</button>
+    <button type="button" class="mn-tab" onclick="switchTab('exclusive', this)">独占邮箱</button>
+</div>
+
+<div id="tab-temp">
+    <div class="mn-mall-note">临时邮箱仅在有效期内接收对应项目的邮件。系统会根据一定规则对邮件进行过滤：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若在临时邮箱中没有你需要的项目，可以点击「联系我们」申请项目。未接入计费，购买即取号，完全免费。</div>
+
+    {% if projects %}
+    <div class="mn-mall-list">
+        {% for p in projects %}
+        <div class="mn-mall-card">
+            <div class="mn-mall-main">
+                <div class="mn-mall-info">
+                    <div class="mn-mall-name">{{ p.name or p.code }}</div>
+                    <div class="mn-mall-code">项目代码: <span class="mono">{{ p.code }}</span></div>
+                    <div class="mn-mall-row">
+                        <span>有效期: {% if p.card_duration and p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟{% elif p.card_duration and p.card_duration|int > 0 %}{{ p.card_duration }} 秒{% else %}—{% endif %}</span>
+                        <span>库存: {% if p.available is not none %}{{ p.available }}{% else %}充足{% endif %}</span>
+                    </div>
+                    <div class="mn-mall-row">
+                        <span>域名过滤: {{ p.card_query or '—' }}</span>
+                        <span>正文过滤: {{ p.card_keywords or '—' }}</span>
+                    </div>
+                </div>
+                {% if p.logo_src %}
+                <img class="mn-mall-logo" src="{{ p.logo_src }}" alt="">
+                {% else %}
+                <div class="mn-mall-logo project-logo-fallback">{{ p.name[:1] }}</div>
+                {% endif %}
+            </div>
+            <div class="mn-mall-foot">
+                <div class="mn-mall-price">
+                    <div class="mn-mall-price-now">免费</div>
+                    <div class="mn-mall-price-origin">¥0.0000</div>
+                </div>
+                <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="card"><div class="empty">暂无项目，请先到「项目」页创建</div></div>
+    {% endif %}
+</div>
+
+<div id="tab-exclusive" style="display:none">
+    <div class="mn-mall-note">独占邮箱可以接收一切邮件（未接入计费，购买即取号，完全免费）。选择项目后取号，邮箱将归您使用。</div>
+    {% if projects %}
+    <div class="mn-mall-list">
+        {% for p in projects %}
+        <div class="mn-mall-card">
+            <div class="mn-mall-main">
+                <div class="mn-mall-info">
+                    <div class="mn-mall-name">{{ p.name or p.code }}</div>
+                    <div class="mn-mall-code">项目代码: <span class="mono">{{ p.code }}</span></div>
+                    <div class="mn-mall-row">
+                        <span>有效期: {% if p.card_duration and p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟{% elif p.card_duration and p.card_duration|int > 0 %}{{ p.card_duration }} 秒{% else %}—{% endif %}</span>
+                        <span>库存: {% if p.available is not none %}{{ p.available }}{% else %}充足{% endif %}</span>
+                    </div>
+                    <div class="mn-mall-row">
+                        <span>域名过滤: {{ p.card_query or '—' }}</span>
+                        <span>正文过滤: {{ p.card_keywords or '—' }}</span>
+                    </div>
+                </div>
+                {% if p.logo_src %}
+                <img class="mn-mall-logo" src="{{ p.logo_src }}" alt="">
+                {% else %}
+                <div class="mn-mall-logo project-logo-fallback">{{ p.name[:1] }}</div>
+                {% endif %}
+            </div>
+            <div class="mn-mall-foot">
+                <div class="mn-mall-price">
+                    <div class="mn-mall-price-now">免费</div>
+                    <div class="mn-mall-price-origin">¥0.0000</div>
+                </div>
+                <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="card"><div class="empty">暂无项目，请先到「项目」页创建</div></div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function switchTab(name, el) {
+    document.querySelectorAll('.mn-tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('tab-temp').style.display = name === 'temp' ? '' : 'none';
+    document.getElementById('tab-exclusive').style.display = name === 'exclusive' ? '' : 'none';
+}
+async function buyEmail(projectCode) {
+    if (!confirm('确认购买（取号）项目 ' + projectCode + '？')) return;
+    try {
+        const res = await api('/api/admin/mails/buy', {
+            method: 'POST',
+            body: JSON.stringify({ project_code: projectCode }),
+        });
+        const email = res.data.email;
+        toast('取号成功：' + email, 'success');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            try { await navigator.clipboard.writeText(email); toast('邮箱地址已复制', 'success'); }
+            catch { /* 忽略剪贴板错误 */ }
+        }
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+</script>
+{% endblock %}

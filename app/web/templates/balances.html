@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}费用明细{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">费用明细</div>
+        <div class="page-sub">查看你的费用明细（未接入计费，以下为收件流水，全部免费）</div>
+    </div>
+    <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+</div>
+
+<div class="mn-table-card">
+    {% if records %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th style="width:48px">序号</th>
+                <th>类型</th>
+                <th>金额</th>
+                <th>变动前余额</th>
+                <th>变动后余额</th>
+                <th>变动前冻结</th>
+                <th>变动后冻结</th>
+                <th>备注</th>
+                <th>时间</th>
+            </tr></thead>
+            <tbody>
+            {% for r in records %}
+            <tr>
+                <td class="mono">{{ (page - 1) * page_size + loop.index }}</td>
+                <td><span class="badge badge-temp">收件</span></td>
+                <td><span class="mono mn-price-free">免费</span></td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td class="mono">—</td>
+                <td>
+                    <a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}{% if r.project_code %}&project_code={{ r.project_code|urlencode }}{% endif %}">{{ r.email }}</a>
+                    {% if r.project_code %}<span class="mn-count">{{ r.project_code }}</span>{% endif %}
+                    {% if r.code %}<span class="badge badge-code">{{ r.code }}</span>{% endif %}
+                </td>
+                <td class="mono" style="white-space:nowrap">{{ r.received_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="mn-pager">
+        <span>每页 {{ page_size }} 条 · 共 {{ total }} 条明细</span>
+        <div class="btn-row">
+            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page - 1 }}&page_size={{ page_size }}">上一页</a>{% endif %}
+            <span class="mn-pager-info">第 {{ page }} 页 / 共 {{ total_pages }} 页</span>
+            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page + 1 }}&page_size={{ page_size }}">下一页</a>{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty">暂无费用明细</div>
+    {% endif %}
+</div>
+{% endblock %}

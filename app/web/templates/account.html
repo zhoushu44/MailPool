@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}账户资料{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">账户资料</div>
+        <div class="page-sub">查看你的账户资料</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="mn-account-grid">
+        <div class="mn-account-item">
+            <span class="mn-account-label">用户ID：</span>
+            <span class="mono">admin-local</span>
+        </div>
+        <div class="mn-account-item">
+            <span class="mn-account-label">用户名：</span>
+            <span>admin</span>
+        </div>
+        <div class="mn-account-item">
+            <span class="mn-account-label">邀请码：</span>
+            <span>—</span>
+        </div>
+        <div class="mn-account-item">
+            <span class="mn-account-label">邀请人ID：</span>
+            <span>—</span>
+        </div>
+        <div class="mn-account-item">
+            <span class="mn-account-label">注册时间：</span>
+            <span>—</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">API Key</div>
+    <div class="mn-api-row">
+        <code class="mn-api-key mono">{{ api_key or '未生成，点击「重置」创建' }}</code>
+        <div class="btn-row">
+            <button id="mn-api-copy" class="btn btn-sm btn-ghost" {% if not api_key %}disabled{% endif %}>复制</button>
+            <button id="mn-api-reset" class="btn btn-sm">重置</button>
+        </div>
+    </div>
+    <div class="mn-detail-hint" style="margin:10px 0 0">API Key 用于对外接口鉴权（Authorization: Bearer），生成后请妥善保存。可在「设置」页管理全部 Key。</div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    var apiKey = {{ api_key|tojson }};
+    var apiKeys = {{ api_keys|tojson }};
+    var copyBtn = document.getElementById('mn-api-copy');
+    var resetBtn = document.getElementById('mn-api-reset');
+    if (copyBtn) {
+        copyBtn.addEventListener('click', async function () {
+            if (!apiKey) return;
+            try {
+                await navigator.clipboard.writeText(apiKey);
+                toast('已复制 API Key', 'success');
+            } catch (err) {
+                toast('复制失败：' + err.message, 'error');
+            }
+        });
+    }
+    if (resetBtn) {
+        resetBtn.addEventListener('click', async function () {
+            if (!confirm('确认重置 API Key？将作废现有全部 Key 并生成一个新 Key。')) return;
+            resetBtn.disabled = true;
+            try {
+                // 先建新 Key，成功后再删旧 Key：中途失败也不至于全部丢失
+                var res = await api('/api/admin/api-keys', { method: 'POST', body: JSON.stringify({ key: '' }) });
+                var newKey = res.data.created || '';
+                for (const k of apiKeys) {
+                    if (k !== newKey) {
+                        await api('/api/admin/api-keys/' + encodeURIComponent(k), { method: 'DELETE' });
+                    }
+                }
+                toast('已生成新 API Key', 'success');
+                location.reload();
+            } catch (err) {
+                toast(err.message, 'error');
+                resetBtn.disabled = false;
+            }
+        });
+    }
+})();
+</script>
+{% endblock %}

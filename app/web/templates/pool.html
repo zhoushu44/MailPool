@@ -1,0 +1,220 @@
+{% extends "base.html" %}
+{% block title %}邮箱池{% endblock %}
+{% block content %}
+<div class="page-title">邮箱池</div>
+<div class="page-sub">固定号池（Outlook 等）批量导入与管理；临时源（MailNest / CF / TempMail）无需入池</div>
+
+<div class="stats-grid">
+    <div class="stat-card"><div class="stat-value">{{ counts.total }}</div><div class="stat-label">总数</div></div>
+    <div class="stat-card"><div class="stat-value ok">{{ health.healthy }}</div><div class="stat-label">正常</div></div>
+    <div class="stat-card"><div class="stat-value warn">{{ health.unhealthy }}</div><div class="stat-label">异常</div></div>
+    <div class="stat-card"><div class="stat-value">{{ health.unknown }}</div><div class="stat-label">未检测</div></div>
+    <div class="stat-card"><div class="stat-value warn">{{ counts.using }}</div><div class="stat-label">占用中</div></div>
+    <div class="stat-card"><div class="stat-value dead">{{ counts.dead }}</div><div class="stat-label">失效</div></div>
+</div>
+{% if health.last_scan_at %}
+<div class="page-sub" style="margin-bottom:12px">上次扫描：{{ health.last_scan_at[:19].replace('T', ' ') }}</div>
+{% endif %}
+
+{% if cid_stats %}
+<div class="card">
+    <div class="card-title">client_id 维度统计</div>
+    <div class="page-sub">识别被微软封禁的 client_id：同一 client_id 的号集体失效说明该 client_id 已被微软拉黑，需更换。</div>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>client_id</th><th>总数</th><th>正常</th><th>异常</th><th>失效</th><th>未检测</th><th>正常率</th></tr></thead>
+        <tbody>
+        {% for c in cid_stats %}
+        <tr>
+            <td class="mono">{{ c.client_id }}</td>
+            <td>{{ c.total }}</td>
+            <td style="color:var(--success)">{{ c.healthy }}</td>
+            <td style="color:var(--warning)">{{ c.unhealthy }}</td>
+            <td style="color:var(--danger)">{{ c.dead }}</td>
+            <td>{{ c.available }}</td>
+            <td>{% if c.healthy_rate >= 80 %}<span style="color:var(--success)">{{ c.healthy_rate }}%</span>{% elif c.healthy_rate >= 30 %}<span style="color:var(--warning)">{{ c.healthy_rate }}%</span>{% else %}<span style="color:var(--danger)">{{ c.healthy_rate }}%</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-title">批量导入</div>
+    <form id="import-form">
+        <div class="form-row">
+            <div>
+                <label>邮箱源</label>
+                <select name="provider" id="import-provider">
+                    {% for p in providers %}
+                    {% if p.pooled %}
+                    <option value="{{ p.id }}">{{ p.name }}</option>
+                    {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label>备注</label>
+                <input name="remark" placeholder="可选，如批次/用途">
+            </div>
+        </div>
+        <div>
+            <label>账号文本（每行一个；Outlook 支持 3 种格式：<br>
+                4 段 <code>email----password----client_id----refresh_token</code>（Graph API）<br>
+                3 段 <code>email----password----refresh_token</code>（需配合默认 client_id）<br>
+                2 段 <code>email----password</code>（IMAP 密码登录，微软可能禁用）</label>
+            <textarea name="text" placeholder="user1@outlook.com----Pass123----9e5f94bc-xxxx----M.C5xx_xxx"></textarea>
+        </div>
+        <div class="btn-row">
+            <button type="submit" class="btn btn-success">导入</button>
+            <button type="button" class="btn btn-ghost" onclick="healthCheck(false)">健康扫描</button>
+            <button type="button" class="btn btn-ghost" onclick="healthCheck(true)">强制重扫</button>
+        </div>
+    </form>
+    <div id="import-result" style="margin-top:12px"></div>
+</div>
+
+<div class="card table-wrap">
+    <div class="card-title">账号列表（本页 {{ accounts|length }} 条 / 共 {{ counts.total }} 条）
+        {% if counts.total > accounts|length %}
+        <span style="font-weight:400;font-size:12px;color:#6b7280">
+            &nbsp;第 {{ (page_offset // page_limit) + 1 }} 页
+        </span>
+        {% endif %}
+    </div>
+    <table>
+        <thead><tr><th>ID</th><th>邮箱</th><th>邮箱源</th><th>状态</th><th>检测详情</th><th>检测时间</th><th>备注</th><th>操作</th></tr></thead>
+        <tbody>
+        {% for a in accounts %}
+        <tr>
+            <td>{{ a.id }}</td>
+            <td class="mono">{{ a.email }}</td>
+            <td>{{ a.provider }}</td>
+            <td>
+                {% if a.status == 'healthy' %}<span class="badge badge-available">正常</span>
+                {% elif a.status == 'available' %}<span class="badge badge-available">未检测</span>
+                {% elif a.status == 'using' %}<span class="badge badge-using">占用</span>
+                {% elif a.status == 'unhealthy' %}<span class="badge badge-dead">异常</span>
+                {% else %}<span class="badge badge-dead">失效</span>{% endif %}
+                {% if a.used_by %}<span class="badge badge-using" title="已被项目用过，其他项目不可再取">被 {{ a.used_by }} 绑定</span>{% endif %}
+            </td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ a.check_result }}">{{ a.check_result or '—' }}</td>
+            <td>{{ a.last_check_at.strftime('%Y-%m-%d %H:%M') if a.last_check_at else '—' }}</td>
+            <td>{{ a.remark }}</td>
+            <td>
+                <div class="btn-row">
+                    <button class="btn btn-sm btn-ghost" onclick="release({{ a.id }})">释放</button>
+                    <button class="btn btn-sm btn-danger" onclick='del({{ a.id }}, {{ a.email|tojson }})'>删除</button>
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% if not accounts %}
+    <div class="empty">暂无账号</div>
+    {% endif %}
+    {% if counts.total > page_limit %}
+    <div class="btn-row" style="margin-top:12px;align-items:center">
+        {% if page_offset > 0 %}
+        <a class="btn btn-sm btn-ghost" href="/pool?limit={{ page_limit }}&offset={{ [page_offset - page_limit, 0]|max }}">← 上一页</a>
+        {% endif %}
+        <span style="font-size:13px;color:#6b7280">
+            第 {{ (page_offset // page_limit) + 1 }} / {{ ((counts.total + page_limit - 1) // page_limit) }} 页
+            （每页 {{ page_limit }} 条）
+        </span>
+        {% if page_offset + page_limit < counts.total %}
+        <a class="btn btn-sm btn-ghost" href="/pool?limit={{ page_limit }}&offset={{ page_offset + page_limit }}">下一页 →</a>
+        {% endif %}
+        <a class="btn btn-sm btn-ghost" href="/pool?limit=500&offset=0">显示 500 条</a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+document.getElementById('import-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const body = {
+        provider: this.provider.value,
+        text: this.text.value,
+        remark: this.remark.value,
+    };
+    try {
+        const res = await api('/api/admin/emails/import', { method: 'POST', body: JSON.stringify(body) });
+        const box = document.getElementById('import-result');
+        let html = '✅ 成功导入 <b>' + esc(res.data.imported) + '</b> 条'
+                 + (res.data.skipped ? '，跳过重复 <b>' + esc(res.data.skipped) + '</b> 条' : '')
+                 + (res.data.error_count ? '，格式错误 <b>' + esc(res.data.error_count) + '</b> 条' : '');
+        if (res.data.errors && res.data.errors.length) {
+            html += '<br><span style="color:#dc2626">错误明细（前 20）：<br>'
+                 + res.data.errors.map(esc).join('<br>') + '</span>';
+        }
+        box.innerHTML = html;
+        toast(res.data.message || '导入完成', res.data.error_count ? 'warn' : '');
+        // 页面刷新会清空上面的提示，先存起来，刷新后仍然可见
+        try { sessionStorage.setItem('mailpool_import_msg', html); } catch (e) {}
+        setTimeout(() => location.reload(), 900);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+});
+
+// 刷新后恢复上一次导入结果（否则 0.9s 后就被 reload 抹掉了）
+(function restoreImportResult(){
+    try {
+        const msg = sessionStorage.getItem('mailpool_import_msg');
+        if (!msg) return;
+        sessionStorage.removeItem('mailpool_import_msg');
+        const box = document.getElementById('import-result');
+        if (box) box.innerHTML = msg + '<div style="color:#6b7280;font-size:12px;margin-top:4px">（上一次导入结果）</div>';
+    } catch (e) {}
+})();
+
+async function healthCheck(force) {
+    const provider = document.getElementById('import-provider').value;
+    const box = document.getElementById('import-result');
+    box.innerHTML = '<span style="color:#6b7280">扫描中（串行检测，每号间隔 2-3 秒）...</span>';
+    try {
+        const res = await api('/api/admin/emails/health', {
+            method: 'POST',
+            body: JSON.stringify({ provider, limit: 50, force: !!force }),
+        });
+        const d = res.data;
+        let html = '扫描完成：检测 ' + d.checked + ' 个，正常 ' + d.healthy + '，异常 ' + d.unhealthy;
+        if (d.skipped) html += '，跳过 ' + d.skipped + '（7天内已检测）';
+        if (d.need_review) html += '，<span style="color:#d97706">待人工确认 ' + d.need_review + ' 个（dead/风控，已改为不自动删除）</span>';
+        if (d.paused) html += ' <span style="color:#dc2626">（检测到连续风控，已自动暂停）</span>';
+        html += '<br><table><tr><th>邮箱</th><th>状态</th><th>详情</th></tr>';
+        d.details.forEach(s => {
+            const st = s.status === 'healthy' ? '✅ 正常'
+                     : s.status === 'dead' ? '⛔ 失效（未删除）'
+                     : s.status === 'deleted' ? '🗑 已删除'
+                     : '❌ 异常';
+            html += '<tr><td class="mono">' + esc(s.email) + '</td><td>' + st + '</td><td>' + esc(s.detail || '') + '</td></tr>';
+        });
+        html += '</table>';
+        box.innerHTML = html;
+        setTimeout(() => location.reload(), 3000);
+    } catch (err) {
+        box.innerHTML = '<span style="color:#dc2626">' + esc(err.message) + '</span>';
+    }
+}
+
+async function release(id) {
+    // 释放 = 永久退役（不可回池），必须二次确认，避免与「删除」的风险不对称
+    if (!confirm('确认释放该账号？\n\n释放后账号将永久退役，不会再被任何项目取到。')) return;
+    try { await api('/api/admin/emails/release/' + id, { method: 'POST' }); location.reload(); }
+    catch (err) { toast(err.message, 'error'); }
+}
+async function del(id, email) {
+    if (!confirm('删除 ' + email + '？')) return;
+    try { await api('/api/admin/emails/' + id, { method: 'DELETE' }); location.reload(); }
+    catch (err) { toast(err.message, 'error'); }
+}
+</script>
+{% endblock %}

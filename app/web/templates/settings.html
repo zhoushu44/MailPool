@@ -1,0 +1,351 @@
+{% extends "base.html" %}
+{% block title %}设置{% endblock %}
+{% block content %}
+<div class="page-title">设置</div>
+<div class="page-sub">配置各邮箱源（Provider）的全局参数、管理 API Key</div>
+
+<div class="card">
+    <div class="card-title">API Key 管理</div>
+    <div class="form-row" style="align-items:flex-end">
+        <div><label>新增 API Key</label><input id="new-key" placeholder="留空自动生成"></div>
+        <div><button class="btn btn-success" onclick="addKey()">添加</button></div>
+    </div>
+    <div class="table-wrap">
+    <table>
+        <thead><tr><th>Key</th><th>操作</th></tr></thead>
+        <tbody>
+        {% for k in api_keys %}
+        <tr>
+            <td class="mono">{{ k }}</td>
+            <td><button class="btn btn-sm btn-danger" data-confirm="删除该 Key？" onclick="delKey('{{ k }}')">删除</button></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% if not api_keys %}
+    <div class="empty">未配置 API Key —— 当前 API 免鉴权开放（仅建议本机使用）</div>
+    {% endif %}
+    <div class="page-sub" style="margin-top:10px">调用方式：<code class="mono">Authorization: Bearer &lt;key&gt;</code></div>
+</div>
+
+{% for p in providers %}
+<div class="card">
+    <div class="card-title">
+        {{ p.name }}
+        <span style="flex:1"></span>
+        <button class="btn btn-sm btn-ghost" onclick="testProvider('{{ p.id }}')">测试连接</button>
+        <button class="btn btn-sm" onclick="saveProvider('{{ p.id }}')">保存</button>
+    </div>
+    {% if p.help_text %}<div class="page-sub" style="white-space:pre-line">{{ p.help_text }}</div>{% endif %}
+    <form id="provider-form-{{ p.id }}">
+        {% for f in p.config_fields %}
+        <div>
+            <label>{{ f.label }}{% if f.required %} <span style="color:#dc2626">*</span>{% endif %}</label>
+            {% if f.type == 'textarea' %}
+            <textarea name="{{ f.key }}" placeholder="{{ f.placeholder }}" {% if f.required %}required{% endif %}>{{ p.config.get(f.key, f.default) }}</textarea>
+            {% elif f.type == 'password' %}
+            <input type="password" name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config.get(f.key, '') }}">
+            {% elif f.type == 'number' %}
+            <input type="number" name="{{ f.key }}" value="{{ p.config.get(f.key, f.default) }}">
+            {% else %}
+            <input name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config.get(f.key, f.default) }}">
+            {% endif %}
+            {% if f.help %}<div class="page-sub" style="font-size:12px">{{ f.help }}</div>{% endif %}
+        </div>
+        {% endfor %}
+    </form>
+    <div id="provider-result-{{ p.id }}"></div>
+</div>
+{% endfor %}
+
+<div class="card danger-zone">
+    <div class="card-title">管理口令</div>
+    <p class="page-sub">管理后台口令由环境变量 <code class="mono">MAILPOOL_ADMIN_PASSWORD</code> 设置。
+        {% if has_password %}<span class="badge badge-on">已设置</span>{% else %}<span class="badge badge-off">未设置（后台免密）</span>{% endif %}
+    </p>
+</div>
+
+<div class="card">
+    <div class="card-title">健康扫描</div>
+    <p class="page-sub">定时检测池内 Outlook 账号的 token 有效性，标注正常/异常状态。串行检测，连续风控自动暂停。</p>
+    <form id="health-check-form">
+        <div class="toggle-row" style="margin-bottom:12px">
+            <label class="toggle">
+                <input type="checkbox" name="health_check_enabled" value="true" {{ 'checked' if health_check_cfg.health_check_enabled == 'true' else '' }}>
+                <span class="toggle-slider"></span>
+            </label>
+            <label>启用每日自动扫描</label>
+        </div>
+        <div class="form-row">
+            <div>
+                <label>执行时间（小时）</label>
+                <input type="number" name="health_check_hour" min="0" max="23" value="{{ health_check_cfg.health_check_hour }}">
+            </div>
+            <div>
+                <label>分钟</label>
+                <input type="number" name="health_check_minute" min="0" max="59" value="{{ health_check_cfg.health_check_minute }}">
+            </div>
+        </div>
+        <div class="btn-row">
+            <button type="button" class="btn btn-success" onclick="saveHealthCheck()">保存配置</button>
+            <button type="button" class="btn btn-ghost" onclick="runHealthCheckNow()">立即扫描一次</button>
+        </div>
+    </form>
+    {% if health_check_last %}
+    <div class="page-sub" style="margin-top:10px">
+        上次扫描：检测 {{ health_check_last.checked }} / 正常 {{ health_check_last.healthy }} / 异常 {{ health_check_last.unhealthy }}
+    </div>
+    {% endif %}
+    <div id="health-check-result" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">心跳保活</div>
+    <p class="page-sub">定时对池内 healthy 账号执行 Graph API 静默拉取，保持账号活跃，防止微软风控判定为僵尸号。</p>
+    <form id="heartbeat-form">
+        <div class="toggle-row" style="margin-bottom:12px">
+            <label class="toggle">
+                <input type="checkbox" name="heartbeat_enabled" value="true" {{ 'checked' if heartbeat_cfg.heartbeat_enabled == 'true' else '' }}>
+                <span class="toggle-slider"></span>
+            </label>
+            <label>启用每日保活</label>
+        </div>
+        <div class="form-row">
+            <div>
+                <label>保活模式</label>
+                <select name="heartbeat_mode">
+                    <option value="silent" {{ 'selected' if heartbeat_cfg.heartbeat_mode != 'interactive' else '' }}>静默拉取（推荐，零风险）</option>
+                    <option value="interactive" {{ 'selected' if heartbeat_cfg.heartbeat_mode == 'interactive' else '' }}>拟真交互（标记已读）</option>
+                </select>
+            </div>
+            <div>
+                <label>执行时间（小时）</label>
+                <input type="number" name="heartbeat_hour" min="0" max="23" value="{{ heartbeat_cfg.heartbeat_hour }}">
+            </div>
+            <div>
+                <label>分钟</label>
+                <input type="number" name="heartbeat_minute" min="0" max="59" value="{{ heartbeat_cfg.heartbeat_minute }}">
+            </div>
+        </div>
+        <div class="btn-row">
+            <button type="button" class="btn btn-success" onclick="saveHeartbeat()">保存配置</button>
+            <button type="button" class="btn btn-ghost" onclick="runHeartbeatNow()">立即执行一次</button>
+        </div>
+    </form>
+    {% if heartbeat_last %}
+    <div class="page-sub" style="margin-top:10px">
+        上次执行：成功 {{ heartbeat_last.success }} / 失败 {{ heartbeat_last.failed }} / 总计 {{ heartbeat_last.total }}
+    </div>
+    {% endif %}
+    <div id="heartbeat-result" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">定时全量刷新 Token</div>
+    <p class="page-sub">定时对所有可用 Outlook 账号执行全量 Token 刷新，避免 refresh_token 过期。串行刷新 + 限流保护，执行期间请勿手动重复发起。</p>
+    <form id="refresh-form">
+        <div class="toggle-row" style="margin-bottom:12px">
+            <label class="toggle">
+                <input type="checkbox" name="refresh_enabled" value="true" {{ 'checked' if refresh_cfg.refresh_enabled == 'true' else '' }}>
+                <span class="toggle-slider"></span>
+            </label>
+            <label>启用每日定时刷新</label>
+        </div>
+        <div class="form-row">
+            <div>
+                <label>执行时间（小时）</label>
+                <input type="number" name="refresh_hour" min="0" max="23" value="{{ refresh_cfg.refresh_hour }}">
+            </div>
+            <div>
+                <label>分钟</label>
+                <input type="number" name="refresh_minute" min="0" max="59" value="{{ refresh_cfg.refresh_minute }}">
+            </div>
+        </div>
+        <div class="btn-row">
+            <button type="button" class="btn btn-success" onclick="saveRefreshConfig()">保存配置</button>
+            <button type="button" class="btn btn-ghost" onclick="runRefreshNow()">立即刷新一次</button>
+        </div>
+    </form>
+    {% if refresh_last %}
+    <div class="page-sub" style="margin-top:10px">
+        上次执行：成功 {{ refresh_last.success }} / 失败 {{ refresh_last.failed }} / 总计 {{ refresh_last.total }}（耗时 {{ refresh_last.duration }}s）
+    </div>
+    {% endif %}
+    <div id="refresh-result" style="margin-top:8px"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function collectForm(id) {
+    const form = document.getElementById('provider-form-' + id);
+    const data = {};
+    new FormData(form).forEach((v, k) => data[k] = v);
+    return data;
+}
+async function saveProvider(id) {
+    try {
+        await api('/api/admin/providers/' + id + '/config', {
+            method: 'POST',
+            body: JSON.stringify({ config: collectForm(id) }),
+        });
+        toast('已保存 ' + id, 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+async function testProvider(id) {
+    const box = document.getElementById('provider-result-' + id);
+    box.innerHTML = '测试中...';
+    try {
+        await api('/api/admin/providers/' + id + '/config', {
+            method: 'POST', body: JSON.stringify({ config: collectForm(id) }),
+        });
+        const res = await api('/api/admin/providers/' + id + '/test', { method: 'POST', body: '{}' });
+        box.innerHTML = res.data && res.data.ok
+            ? '✅ ' + (res.data.message || '连接成功')
+            : '❌ ' + (res.data && res.data.message || '失败');
+    } catch (err) { box.innerHTML = '❌ ' + err.message; }
+}
+async function addKey() {
+    const input = document.getElementById('new-key');
+    try {
+        const res = await api('/api/admin/api-keys', {
+            method: 'POST', body: JSON.stringify({ key: input.value.trim() || null }),
+        });
+        if (res.data.created && input.value === '') {
+            alert('新生成的 Key：\n' + res.data.created + '\n（请立即复制保存）');
+        }
+        location.reload();
+    } catch (err) { toast(err.message, 'error'); }
+}
+async function delKey(key) {
+    try {
+        await api('/api/admin/api-keys/' + encodeURIComponent(key), { method: 'DELETE' });
+        location.reload();
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+// 健康扫描
+async function saveHealthCheck() {
+    const form = document.getElementById('health-check-form');
+    const data = {
+        health_check_enabled: form.health_check_enabled.checked ? 'true' : 'false',
+        health_check_hour: form.health_check_hour.value,
+        health_check_minute: form.health_check_minute.value,
+    };
+    try {
+        await api('/api/admin/pool/health-check-config', {
+            method: 'PUT', body: JSON.stringify(data),
+        });
+        toast('健康扫描配置已保存', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function runHealthCheckNow() {
+    const box = document.getElementById('health-check-result');
+    box.innerHTML = '<span style="color:#6b7280">扫描中（串行检测，每号间隔 2-3 秒）...</span>';
+    try {
+        const res = await api('/api/admin/emails/health', {
+            method: 'POST', body: JSON.stringify({ provider: 'outlook', limit: 50, force: false }),
+        });
+        const d = res.data;
+        let html = '扫描完成：检测 ' + d.checked + ' 个，正常 ' + d.healthy + '，异常 ' + d.unhealthy;
+        if (d.paused) html += ' <span style="color:#dc2626">（连续风控，已暂停）</span>';
+        html += '<br><table><tr><th>邮箱</th><th>状态</th><th>详情</th></tr>';
+        d.details.forEach(s => {
+            html += '<tr><td class="mono">' + s.email + '</td><td>' + (s.status === 'healthy' ? '✅' : '❌') + '</td><td>' + (s.detail || '') + '</td></tr>';
+        });
+        html += '</table>';
+        box.innerHTML = html;
+    } catch (err) {
+        box.innerHTML = '<span style="color:#dc2626">' + err.message + '</span>';
+    }
+}
+
+// 心跳保活
+async function saveHeartbeat() {
+    const form = document.getElementById('heartbeat-form');
+    const data = {
+        heartbeat_enabled: form.heartbeat_enabled.checked ? 'true' : 'false',
+        heartbeat_mode: form.heartbeat_mode.value,
+        heartbeat_hour: form.heartbeat_hour.value,
+        heartbeat_minute: form.heartbeat_minute.value,
+    };
+    try {
+        await api('/api/admin/pool/heartbeat-config', {
+            method: 'PUT', body: JSON.stringify(data),
+        });
+        toast('保活配置已保存', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function runHeartbeatNow() {
+    const form = document.getElementById('heartbeat-form');
+    const mode = form.heartbeat_mode.value;
+    const box = document.getElementById('heartbeat-result');
+    box.innerHTML = '<span style="color:#6b7280">保活执行中（串行，每号间隔 5-15 秒）...</span>';
+    try {
+        const res = await api('/api/admin/pool/heartbeat', {
+            method: 'POST', body: JSON.stringify({ mode, limit: 50 }),
+        });
+        const d = res.data;
+        let html = '保活完成：总计 ' + d.total + '，成功 ' + d.success + '，失败 ' + d.failed;
+        html += '<br><table><tr><th>邮箱</th><th>结果</th><th>详情</th></tr>';
+        d.details.forEach(s => {
+            html += '<tr><td class="mono">' + s.email + '</td><td>' + (s.result === 'success' ? '✅' : '❌') + '</td><td>' + (s.detail || '') + '</td></tr>';
+        });
+        html += '</table>';
+        box.innerHTML = html;
+    } catch (err) {
+        box.innerHTML = '<span style="color:#dc2626">' + err.message + '</span>';
+    }
+}
+
+// 定时全量刷新 Token
+async function saveRefreshConfig() {
+    const form = document.getElementById('refresh-form');
+    const data = {
+        refresh_enabled: form.refresh_enabled.checked ? 'true' : 'false',
+        refresh_hour: form.refresh_hour.value,
+        refresh_minute: form.refresh_minute.value,
+    };
+    try {
+        await api('/api/admin/pool/refresh-config', {
+            method: 'PUT', body: JSON.stringify(data),
+        });
+        toast('定时刷新配置已保存', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function runRefreshNow() {
+    const box = document.getElementById('refresh-result');
+    box.innerHTML = '<span style="color:#6b7280">全量刷新已启动（串行，每号间隔 3 秒）...</span>';
+    try {
+        const res = await api('/api/admin/emails/refresh-all', {
+            method: 'POST', body: JSON.stringify({ provider: 'outlook' }),
+        });
+        const d = res.data;
+        if (d.running && !d.task_id) {
+            box.innerHTML = '<span style="color:#d97706">' + d.message + '</span>';
+            return;
+        }
+        // 轮询进度直到完成
+        const taskId = d.task_id;
+        const timer = setInterval(async () => {
+            try {
+                const st = await api('/api/admin/emails/refresh-all/status?task_id=' + taskId);
+                const s = st.data || {};
+                if (s.status === 'running') return;
+                clearInterval(timer);
+                box.innerHTML = '全量刷新完成：共 ' + s.total + '，成功 ' + s.success + '，失败 ' + s.failed + '，跳过 ' + s.skipped + '（耗时 ' + (s.duration || '') + 's）';
+            } catch (e) {
+                clearInterval(timer);
+                box.innerHTML = '<span style="color:#dc2626">' + e.message + '</span>';
+            }
+        }, 3000);
+    } catch (err) {
+        box.innerHTML = '<span style="color:#dc2626">' + err.message + '</span>';
+    }
+}
+</script>
+{% endblock %}

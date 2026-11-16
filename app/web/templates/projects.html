@@ -1,0 +1,306 @@
+{% extends "base.html" %}
+{% block title %}项目{% endblock %}
+{% block content %}
+<div class="page-title">项目管理</div>
+<div class="page-sub">每个项目绑定一个 project_code 和一个邮箱源，API 用 project_code 取号取码</div>
+
+<div class="card">
+    <div class="card-title">新建 / 编辑项目</div>
+    <form id="project-form">
+        <input type="hidden" name="project_id" id="f-id">
+        <div class="form-row">
+            <div>
+                <label>项目编码（project_code）</label>
+                <input name="code" id="f-code" placeholder="如 chatgpt001" required>
+            </div>
+            <div>
+                <label>项目名称</label>
+                <input name="name" id="f-name" placeholder="如 ChatGPT 注册">
+            </div>
+        </div>
+        <div class="form-row">
+            <div>
+                <label>邮箱源（Provider）</label>
+                <select name="provider" id="f-provider">
+                    {% for p in providers %}
+                    <option value="{{ p.id }}">{{ p.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label>状态</label>
+                <select name="enabled" id="f-enabled">
+                    <option value="1">启用</option>
+                    <option value="0">停用</option>
+                </select>
+            </div>
+        </div>
+        <div>
+            <label>项目图标（内置 Logo 可选，或填写自定义图片 URL）</label>
+            <div class="logo-picker" id="logo-picker">
+                <div class="logo-option" data-logo="" onclick="pickLogo(this)" title="无图标（显示项目名首字母）">
+                    <span class="lf">?</span>
+                </div>
+                {% for l in logos %}
+                <div class="logo-option" data-logo="{{ l.id }}" onclick="pickLogo(this)" title="{{ l.name }}">
+                    <img src="{{ l.src }}" alt="{{ l.name }}">
+                </div>
+                {% endfor %}
+                <div class="logo-option logo-custom" data-logo="custom" onclick="pickLogo(this)" title="自定义图片 URL">
+                    <span>+</span>
+                </div>
+            </div>
+            <input type="text" id="f-logo-url" placeholder="自定义图片 URL（如 https://example.com/logo.png，SVG/PNG 均可）" style="display:none;margin-bottom:8px">
+            <div class="page-sub" style="margin-bottom:0;font-size:12px">不选图标时，卡片自动显示项目名首字母。</div>
+        </div>
+        <div>
+            <label>Provider 参数（JSON，覆盖全局配置，如 MailNest 的 product_code）</label>
+            <textarea name="config" id="f-config" placeholder='{"product_code": "chatgpt001"}'>{"product_code": "chatgpt001"}</textarea>
+        </div>
+        <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+                <label style="margin:0">验证码提取正则（可选，每行一个，优先于自动提取）</label>
+                <select id="f-regex-template" style="width:auto;margin:0;padding:3px 8px;font-size:12px" onchange="applyRegexTemplate()">
+                    <option value="">常用模板…</option>
+                    <option value='(?P<code>\d{6})'>6 位数字（(?P&lt;code&gt;\d{6})）</option>
+                    <option value='(?P<code>\d{4})'>4 位数字（(?P&lt;code&gt;\d{4})）</option>
+                    <option value='(?P<code>\d{8})'>8 位数字（(?P&lt;code&gt;\d{8})）</option>
+                    <option value='(?:验证码|code|otp)[^\d]{0,40}(?P<code>\d{4,8})'>关键词后数字（验证码：123456）</option>
+                    <option value='\b(?P<code>[A-Z0-9]{3,8}-[A-Z0-9]{2,8})\b'>字母数字混合（FPW-62T）</option>
+                </select>
+                <button type="button" class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="openRegexTest()">测试正则</button>
+            </div>
+            <textarea name="code_regex" id="f-regex" rows="2" placeholder='每行一个正则，如：&#10;(?P&lt;code&gt;\d{6})&#10;\b(?P&lt;code&gt;[A-Z0-9]{3,8}-[A-Z0-9]{2,8})\b&#10;以 # 开头的行为注释'></textarea>
+            <div class="page-sub" style="margin-bottom:0;font-size:12px">支持命名组 <code>(?P&lt;code&gt;...)</code> 指定验证码；无命名组取第一个捕获组；不填则用自动提取。</div>
+        </div>
+        <div class="btn-row">
+            <button type="submit" class="btn btn-success">保存</button>
+            <button type="button" class="btn btn-ghost" onclick="resetForm()">清空</button>
+        </div>
+    </form>
+</div>
+
+<div id="regex-test-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeRegexTest()">
+    <div class="modal">
+        <div class="card-title">正则提取测试
+            <span style="flex:1"></span>
+            <button class="btn btn-sm btn-ghost" onclick="closeRegexTest()">关闭</button>
+        </div>
+        <div class="page-sub" style="margin-bottom:12px">把收到的邮件 / 短信内容粘到下方，点「测试」看能否提取出验证码。</div>
+        <label>邮件 / 短信内容</label>
+        <textarea id="rt-text" rows="6" placeholder="粘贴收到的邮件或短信原文，如：&#10;您的验证码是 123456，5 分钟内有效。"></textarea>
+        <label>正则</label>
+        <textarea id="rt-regex" rows="2" placeholder="(?P<code>\d{6})"></textarea>
+        <div class="btn-row">
+            <button class="btn" onclick="runRegexTest()">测试</button>
+        </div>
+        <div id="rt-result" style="margin-top:12px"></div>
+    </div>
+</div>
+
+<div class="card table-wrap">
+    <div class="card-title">项目列表</div>
+    {% if projects %}
+    <table>
+        <thead><tr><th>ID</th><th>图标</th><th>编码</th><th>名称</th><th>邮箱源</th><th>可用邮箱</th><th>参数</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody>
+        {% for p in projects %}
+        <tr>
+            <td>{{ p.id }}</td>
+            <td>{% if p.logo_src %}<img class="project-logo" src="{{ p.logo_src }}" alt="" style="width:30px;height:30px;border-radius:7px;padding:5px">{% else %}<div class="project-logo project-logo-fallback" style="width:30px;height:30px;border-radius:7px;font-size:14px">{{ p.name[:1] }}</div>{% endif %}</td>
+            <td class="mono">{{ p.code }}</td>
+            <td>{{ p.name }}</td>
+            <td>{{ p.provider }}</td>
+            <td>{% if p.available is not none %}<span class="badge badge-on">{{ p.available }}</span>{% else %}<span class="page-sub">—</span>{% endif %}</td>
+            <td class="mono" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.config_json }}</td>
+            <td>{% if p.enabled %}<span class="badge badge-on">启用</span>{% else %}<span class="badge badge-off">停用</span>{% endif %}</td>
+            <td>
+                <div class="btn-row">
+                    <button class="btn btn-sm btn-ghost" onclick='editProject({{ p.id }}, {{ p.code|tojson }}, {{ p.name|tojson }}, {{ p.provider|tojson }}, {{ p.config_json|tojson }}, {{ p.enabled }})'>编辑</button>
+                    <button class="btn btn-sm btn-danger" onclick='deleteProject({{ p.id }}, {{ p.code|tojson }})'>删除</button>
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty">暂无项目</div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let currentLogo = '';
+function pickLogo(el) {
+    document.querySelectorAll('#logo-picker .logo-option').forEach(o => o.classList.remove('active'));
+    el.classList.add('active');
+    currentLogo = el.dataset.logo || '';
+    document.getElementById('f-logo-url').style.display = (currentLogo === 'custom') ? 'block' : 'none';
+    if (currentLogo !== 'custom') {
+        document.getElementById('f-logo-url').value = '';
+    }
+}
+function setLogoFromConfig(logo) {
+    const val = (logo || '').trim();
+    let target = null;
+    if (!val) {
+        target = document.querySelector('#logo-picker .logo-option[data-logo=""]');
+    } else if (val.startsWith('http')) {
+        target = document.querySelector('#logo-picker .logo-option[data-logo="custom"]');
+    } else {
+        target = document.querySelector('#logo-picker .logo-option[data-logo="' + val + '"]');
+        if (!target) target = document.querySelector('#logo-picker .logo-option[data-logo="custom"]');
+    }
+    if (target) {
+        document.querySelectorAll('#logo-picker .logo-option').forEach(o => o.classList.remove('active'));
+        target.classList.add('active');
+        currentLogo = target.dataset.logo || '';
+        const urlInput = document.getElementById('f-logo-url');
+        if (currentLogo === 'custom' && val.startsWith('http')) {
+            urlInput.value = val;
+            urlInput.style.display = 'block';
+        } else {
+            urlInput.value = '';
+            urlInput.style.display = 'none';
+        }
+    }
+}
+function resetForm() {
+    document.getElementById('project-form').reset();
+    document.getElementById('f-id').value = '';
+    document.getElementById('f-config').value = '{"product_code": "chatgpt001"}';
+    document.getElementById('f-regex').value = '';
+    setLogoFromConfig('');
+}
+function editProject(id, code, name, provider, config, enabled) {
+    let cfg = {};
+    try { cfg = JSON.parse(config || '{}'); } catch (e) {}
+    document.getElementById('f-id').value = id;
+    document.getElementById('f-code').value = code;
+    document.getElementById('f-name').value = name;
+    document.getElementById('f-provider').value = provider;
+    document.getElementById('f-enabled').value = enabled;
+    document.getElementById('f-config').value = JSON.stringify(cfg, null, 2);
+    document.getElementById('f-regex').value = cfg.code_regex || '';
+    document.getElementById('f-regex-template').value = '';
+    setLogoFromConfig(cfg.logo || '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function applyRegexTemplate() {
+    const sel = document.getElementById('f-regex-template');
+    if (sel.value) {
+        const cur = document.getElementById('f-regex').value.trim();
+        document.getElementById('f-regex').value = cur ? cur + '\n' + sel.value : sel.value;
+        sel.value = '';
+    }
+}
+function openRegexTest() {
+    document.getElementById('rt-text').value = '';
+    document.getElementById('rt-regex').value = document.getElementById('f-regex').value;
+    document.getElementById('rt-result').innerHTML = '';
+    document.getElementById('regex-test-modal').style.display = 'flex';
+    document.getElementById('rt-text').focus();
+}
+function closeRegexTest() {
+    document.getElementById('regex-test-modal').style.display = 'none';
+}
+async function runRegexTest() {
+    const text = document.getElementById('rt-text').value;
+    const regex = document.getElementById('rt-regex').value;
+    const box = document.getElementById('rt-result');
+    if (!text.trim() || !regex.trim()) {
+        box.innerHTML = '<div class="login-error">请先填写内容与正则</div>';
+        return;
+    }
+    box.innerHTML = '<div class="page-sub">测试中…</div>';
+    try {
+        const res = await api('/api/admin/code-parse-test', {
+            method: 'POST',
+            body: JSON.stringify({ text, regex }),
+        });
+        const d = res.data || {};
+        if (d.invalid) {
+            box.innerHTML = '<div class="login-error">有 ' + d.invalid + ' 行正则无效（无法编译），请检查</div>';
+            return;
+        }
+        if (d.matched) {
+            box.innerHTML = '<div style="padding:10px 14px;border-radius:8px;background:#f0fdf4;border:1px solid #bbf7d0;color:#166534">' +
+                '提取成功：<code style="font-size:15px;font-weight:700">' + d.matched + '</code>' +
+                '　<span class="badge badge-on">有效</span></div>';
+        } else {
+            box.innerHTML = '<div class="login-error">未提取到验证码，请调整正则后重试</div>';
+        }
+    } catch (err) {
+        box.innerHTML = '<div class="login-error">' + err.message + '</div>';
+    }
+}
+document.getElementById('project-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    // 取表单元素：元素只有 id（f-config / f-code…），没有 name="f_config"，
+    // 因此不能用 this.f_config，必须走 elements['f-config']（或 getElementById）。
+    const el = (id) => document.getElementById(id);
+    let cfg = {};
+    try {
+        cfg = JSON.parse(el('f-config').value || '{}');
+    } catch (parseErr) {
+        toast('项目配置不是合法 JSON：' + parseErr.message, 'error');
+        return;
+    }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+        toast('项目配置必须是 JSON 对象，如 {"product_code": "chatgpt001"}', 'error');
+        return;
+    }
+    const regex = el('f-regex').value.trim();
+    if (regex) {
+        cfg.code_regex = regex;
+    } else {
+        delete cfg.code_regex;
+    }
+    const customUrl = el('f-logo-url').value.trim();
+    if (currentLogo === 'custom') {
+        if (customUrl) {
+            cfg.logo = customUrl;
+        } else {
+            delete cfg.logo;
+        }
+    } else if (currentLogo) {
+        cfg.logo = currentLogo;
+    } else {
+        delete cfg.logo;
+    }
+    const codeValue = el('f-code').value.trim();
+    if (!codeValue) {
+        toast('项目编码不能为空', 'error');
+        el('f-code').focus();
+        return;
+    }
+    const body = {
+        project_id: el('f-id').value ? parseInt(el('f-id').value) : null,
+        code: codeValue,
+        name: el('f-name').value.trim(),
+        provider: el('f-provider').value,
+        enabled: parseInt(el('f-enabled').value),
+        config: cfg,
+    };
+    try {
+        const res = await api('/api/admin/projects', { method: 'POST', body: JSON.stringify(body) });
+        toast('项目已保存', 'success');
+        setTimeout(() => location.reload(), 500);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+});
+async function deleteProject(id, code) {
+    if (!confirm('确认删除项目 ' + code + '？')) return;
+    try {
+        await api('/api/admin/projects/' + id, { method: 'DELETE' });
+        toast('已删除', 'success');
+        setTimeout(() => location.reload(), 500);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+</script>
+{% endblock %}

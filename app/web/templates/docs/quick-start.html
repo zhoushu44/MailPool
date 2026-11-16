@@ -1,0 +1,100 @@
+{% extends "docs_base.html" %}
+{% block doc_title_block %}快速开始{% endblock %}
+{% block doc_content %}
+
+<p class="page-sub">五分钟上手：创建项目 → 配置邮箱源 → 调用 API 取号、取码。</p>
+
+<section class="doc-section">
+    <h2>1. 创建项目</h2>
+    <p>在控制台「<a href="/projects">项目</a>」页面新建项目：</p>
+    <ol class="doc-ol">
+        <li>填写<strong>项目编码</strong>（调用 API 时传入，如 <code>chatgpt001</code>）与<strong>项目名称</strong></li>
+        <li>选择<strong>邮箱源</strong>：MailNest 临时邮箱 / CF 临时邮箱 / TempMail / Outlook 号池</li>
+        <li>配置验证码提取正则与发件匹配规则（发件域名 / 邮件关键词，命中任意一组即放行）</li>
+        <li>保存后项目即为启用状态</li>
+    </ol>
+</section>
+
+<section class="doc-section">
+    <h2>2. 配置邮箱源</h2>
+    <p>在「<a href="/settings">设置</a>」页面对每个邮箱源填入账号密钥；固定号池（Outlook）还需要在「<a href="/pool">邮箱池</a>」导入账号。</p>
+</section>
+
+<section class="doc-section">
+    <h2>3. 调用 API</h2>
+    <p>核心流程三步：<strong>取号 → 等码 → 释放</strong>。</p>
+    <p>先在设置页生成 <strong>API Key</strong>，请求头携带 <code>Authorization: Bearer &lt;API_KEY&gt;</code>。</p>
+
+    <pre class="doc-code"><span class="doc-method doc-method-post">POST</span> <span class="doc-path">/api/v1/email/temporary/buy</span>
+{
+    "project_code": "chatgpt001"
+}</pre>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "email": "xxx@tempmail.lol",
+        "project_code": "chatgpt001",
+        "project_name": "ChatGPT 注册",
+        "status": "holding"
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>4. 等待验证码</h2>
+    <pre class="doc-code"><span class="doc-method doc-method-post">POST</span> <span class="doc-path">/api/v1/email/receive</span>
+{
+    "project_code": "chatgpt001",
+    "email": "xxx@tempmail.lol",
+    "timeout": 120
+}</pre>
+    <pre class="doc-code">{
+    "code": "00000",
+    "data": { "email": "xxx@tempmail.lol", "code": "123456", "status": "success", "elapsed": 8.5 }
+}</pre>
+    <p>收到目标邮件后，系统按项目的正则规则自动提取 <code>code</code>；超时则 <code>status</code> 为 <code>timeout</code>。</p>
+</section>
+
+<section class="doc-section">
+    <h2>5. 释放邮箱</h2>
+    <pre class="doc-code"><span class="doc-method doc-method-post">POST</span> <span class="doc-path">/api/v1/email/release</span>
+{
+    "project_code": "chatgpt001",
+    "email": "xxx@tempmail.lol"
+}</pre>
+    <p>临时邮箱释放后销毁；固定号池账号回池。已使用过的邮箱不会被任何项目再次取到（防复用）。</p>
+</section>
+
+<section class="doc-section">
+    <h2>完整示例（Python）</h2>
+    <pre class="doc-code">import requests
+
+BASE_URL = "http://localhost:8000"
+API_KEY = "你的 API Key"
+
+def buy(project_code: str) -> str:
+    resp = requests.post(
+        f"{BASE_URL}/api/v1/email/temporary/buy",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json={"project_code": project_code},
+        timeout=30,
+    )
+    data = resp.json()
+    assert data["code"] == "00000", data
+    return data["data"]["email"]
+
+def wait_code(project_code: str, email: str, timeout: int = 120) -> str:
+    resp = requests.post(
+        f"{BASE_URL}/api/v1/email/receive",
+        headers={"Authorization": f"Bearer {API_KEY}"},
+        json={"project_code": project_code, "email": email, "timeout": timeout},
+        timeout=timeout + 10,
+    )
+    data = resp.json()
+    assert data["code"] == "00000", data
+    return data["data"]["code"]</pre>
+</section>
+
+{% endblock %}

@@ -1,0 +1,347 @@
+{% extends "docs_base.html" %}
+{% block doc_title_block %}API 文档{% endblock %}
+{% block doc_content %}
+
+<p class="page-sub">MailPool 提供 HTTP API，可用于查询项目、取号、接收验证码、释放邮箱以及查询收件记录。</p>
+
+<section class="doc-section">
+    <h2>基础说明</h2>
+
+    <h3>请求地址</h3>
+    <p><code>http://localhost:8000</code>（默认端口，按部署环境替换）</p>
+
+    <h3>鉴权方式</h3>
+    <p>除产品信息接口外，API 请求需要携带 API Key（在「设置」页生成）。</p>
+    <pre class="doc-code">Authorization: Bearer YOUR_API_KEY</pre>
+    <pre class="doc-code">curl /api/v1/mails -H "Authorization: Bearer YOUR_API_KEY"</pre>
+
+    <h3>响应格式</h3>
+    <p>业务接口统一返回 JSON：</p>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {}
+}</pre>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>code</td><td>string</td><td>业务状态码，<code>00000</code> 表示请求成功</td></tr>
+            <tr><td>msg</td><td>string</td><td>错误信息，成功时通常为空</td></tr>
+            <tr><td>type</td><td>string</td><td>消息类型，成功时为空，出错为 <code>error</code></td></tr>
+            <tr><td>data</td><td>object / array / null</td><td>接口返回数据</td></tr>
+        </tbody>
+    </table>
+
+    <h3>状态码说明</h3>
+    <p>状态分为 HTTP 状态码与业务状态码。业务失败时 HTTP 仍为 200，需判断响应体中的 <code>code</code>。</p>
+    <table class="doc-table">
+        <thead><tr><th>HTTP 状态码</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>200</td><td>请求已被处理，需继续判断响应体中的 code</td></tr>
+            <tr><td>401</td><td>API Key 缺失、错误或已失效</td></tr>
+        </tbody>
+    </table>
+    <p>业务状态码详见「<a href="/docs/errors">错误码</a>」页面。</p>
+</section>
+
+<section class="doc-section">
+    <h2>1. 查询项目信息</h2>
+    <p>查询当前可用的项目（邮箱源）列表，无需 API Key。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/product/info</code></div>
+    <h3>请求示例</h3>
+    <pre class="doc-code">curl /api/product/info</pre>
+    <h3>响应示例</h3>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "temporary": [
+            {
+                "code": "chatgpt001",
+                "name": "ChatGPT 注册",
+                "query": "",
+                "icon": "/static/img/projects/openai.png",
+                "stock": null,
+                "price": "",
+                "original_price": "",
+                "sender_domains": "openai.com",
+                "mail_keywords": "ChatGPT,openai",
+                "duration_seconds": null
+            }
+        ],
+        "exclusive": { "stock": null, "price": "", "original_price": "" }
+    }
+}</pre>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>code</td><td>string</td><td>项目编码，取号时传入</td></tr>
+            <tr><td>name</td><td>string</td><td>项目名称</td></tr>
+            <tr><td>icon</td><td>string / null</td><td>项目图标地址</td></tr>
+            <tr><td>stock</td><td>number / null</td><td>当前可取的号量（固定号池实时计算；临时源为 null）</td></tr>
+            <tr><td>sender_domains</td><td>string</td><td>发件域名过滤（逗号分隔），命中即放行</td></tr>
+            <tr><td>mail_keywords</td><td>string</td><td>邮件关键词过滤（逗号分隔），命中即放行</td></tr>
+        </tbody>
+    </table>
+</section>
+
+<section class="doc-section">
+    <h2>2. 取号（购买临时邮箱）</h2>
+    <p>按项目取一个邮箱。临时源新建地址；固定号池取出未用过的账号。该邮箱立即绑定当前项目，其他项目不可再用。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/email/temporary/buy</code></div>
+    <h3>请求参数</h3>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>project_code</td><td>string</td><td>是</td><td>项目编码，可通过 /api/product/info 获取</td></tr>
+            <tr><td>count</td><td>number</td><td>否</td><td>取号数量，默认 1，范围 1-100</td></tr>
+        </tbody>
+    </table>
+    <h3>请求示例</h3>
+    <pre class="doc-code">curl -X POST /api/v1/email/temporary/buy \
+    -H "Authorization: Bearer YOUR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "project_code": "chatgpt001",
+        "count": 1
+    }'</pre>
+    <h3>响应示例</h3>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "email": "example@tempmail.lol",
+        "provider": "tempmail",
+        "project_code": "chatgpt001",
+        "project_name": "ChatGPT 注册",
+        "account_id": null,
+        "status": "holding",
+        "acquired_at": "2026-08-15T08:00:00+00:00"
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>3. 接收邮件（取验证码）</h2>
+    <p>轮询指定邮箱，等待目标邮件到达并提取验证码。成功收到后返回邮件验证码。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/email/receive</code></div>
+    <h3>请求参数</h3>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>project_code</td><td>string</td><td>是</td><td>项目编码</td></tr>
+            <tr><td>email</td><td>string</td><td>是</td><td>已取到的邮箱地址</td></tr>
+            <tr><td>timeout</td><td>number</td><td>否</td><td>等待秒数，默认取项目配置，范围 10-600</td></tr>
+            <tr><td>skip_codes</td><td>array</td><td>否</td><td>需跳过的验证码列表（收到的验证码在其中则继续等待）</td></tr>
+        </tbody>
+    </table>
+    <h3>请求示例</h3>
+    <pre class="doc-code">curl -X POST /api/v1/email/receive \
+    -H "Authorization: Bearer YOUR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "project_code": "chatgpt001",
+        "email": "example@tempmail.lol",
+        "timeout": 120
+    }'</pre>
+    <h3>响应示例（成功）</h3>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "email": "example@tempmail.lol",
+        "code": "123456",
+        "status": "success",
+        "elapsed": 8.5
+    }
+}</pre>
+    <h3>响应示例（超时）</h3>
+    <p>超时属正常轮询结果，<code>code</code> 仍为 <code>00000</code>，可通过 <code>status</code> 判断：</p>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "email": "example@tempmail.lol",
+        "code": "",
+        "status": "timeout",
+        "elapsed": 120.0,
+        "message": "等待 120s 未收到验证码"
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>4. 释放邮箱</h2>
+    <p>主动释放未收件的邮箱：临时源销毁地址，固定池账号回池（仍不可被其他项目复用）。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/email/release</code></div>
+    <h3>请求参数</h3>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>project_code</td><td>string</td><td>是</td><td>项目编码</td></tr>
+            <tr><td>email</td><td>string</td><td>是</td><td>需要释放的邮箱地址</td></tr>
+        </tbody>
+    </table>
+    <h3>请求示例</h3>
+    <pre class="doc-code">curl -X POST /api/v1/email/release \
+    -H "Authorization: Bearer YOUR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "project_code": "chatgpt001",
+        "email": "example@tempmail.lol"
+    }'</pre>
+    <h3>响应示例</h3>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "email": "example@tempmail.lol",
+        "status": "released",
+        "pooled": false
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>5. 查询收件记录</h2>
+    <p>按邮箱或项目分页查询已收到的邮件。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/mails</code></div>
+    <h3>Query 参数</h3>
+    <table class="doc-table">
+        <thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>email</td><td>string</td><td>否</td><td>按邮箱过滤</td></tr>
+            <tr><td>project_code</td><td>string</td><td>否</td><td>按项目过滤</td></tr>
+            <tr><td>page</td><td>number</td><td>否</td><td>页码，默认 1</td></tr>
+            <tr><td>page_size</td><td>number</td><td>否</td><td>每页数量，默认 20，最大 500</td></tr>
+        </tbody>
+    </table>
+    <h3>请求示例</h3>
+    <pre class="doc-code">curl "/api/v1/mails?page=1&page_size=20" \
+    -H "Authorization: Bearer YOUR_API_KEY"</pre>
+    <h3>响应示例</h3>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "total": 1,
+        "page": 1,
+        "page_size": 20,
+        "items": [
+            {
+                "id": 1,
+                "email": "example@tempmail.lol",
+                "project_code": "chatgpt001",
+                "sender": "no-reply@openai.com",
+                "subject": "Your verification code",
+                "body": "Your verification code is 123456.",
+                "code": "123456",
+                "received_at": "2026-08-15T08:10:00+00:00"
+            }
+        ]
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>6. 健康检查</h2>
+    <p>查询平台状态与各邮箱源配置情况。</p>
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/health</code></div>
+    <pre class="doc-code">curl /api/v1/health -H "Authorization: Bearer YOUR_API_KEY"</pre>
+    <pre class="doc-code">{
+    "code": "00000",
+    "msg": "",
+    "type": "",
+    "data": {
+        "status": "online",
+        "providers": [
+            { "id": "mailnest", "name": "MailNest 临时邮箱", "configured": true },
+            { "id": "cf_temp", "name": "CF 临时邮箱", "configured": false }
+        ],
+        "project_count": 1
+    }
+}</pre>
+</section>
+
+<section class="doc-section">
+    <h2>完整示例（Python）</h2>
+    <p>使用 MailPool 提供的邮箱完成注册收码全流程：</p>
+    <pre class="doc-code">from time import sleep
+
+import requests
+
+BASE_URL = "http://localhost:8000"
+API_KEY = "YOUR_API_KEY"
+PROJECT_CODE = "chatgpt001"
+
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+
+
+def get_product_info():
+    """查询项目信息（无需 API Key）"""
+    resp = requests.get(f"{BASE_URL}/api/product/info", timeout=30)
+    return resp.json()["data"]
+
+
+def buy_email():
+    """取号"""
+    resp = requests.post(
+        f"{BASE_URL}/api/v1/email/temporary/buy",
+        headers=HEADERS,
+        json={"project_code": PROJECT_CODE},
+        timeout=30,
+    )
+    data = resp.json()
+    assert data["code"] == "00000", data
+    return data["data"]["email"]
+
+
+def receive_code(email: str, timeout: int = 120):
+    """等待验证码"""
+    resp = requests.post(
+        f"{BASE_URL}/api/v1/email/receive",
+        headers=HEADERS,
+        json={"project_code": PROJECT_CODE, "email": email, "timeout": timeout},
+        timeout=timeout + 10,
+    )
+    data = resp.json()
+    assert data["code"] == "00000", data
+    return data["data"]
+
+
+def release_email(email: str):
+    """释放邮箱"""
+    resp = requests.post(
+        f"{BASE_URL}/api/v1/email/release",
+        headers=HEADERS,
+        json={"project_code": PROJECT_CODE, "email": email},
+        timeout=30,
+    )
+    data = resp.json()
+    assert data["code"] == "00000", data
+
+
+if __name__ == "__main__":
+    # 1. 取号
+    email = buy_email()
+    print(f"取到邮箱: {email}")
+
+    # 2. 轮询等验证码（最多等 120s）
+    result = receive_code(email, timeout=120)
+    if result["status"] == "success":
+        print(f"验证码: {result['code']}（耗时 {result['elapsed']}s）")
+    else:
+        print("超时未收到验证码")
+
+    # 3. 释放
+    release_email(email)</pre>
+</section>
+
+{% endblock %}

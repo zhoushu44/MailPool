@@ -1,0 +1,173 @@
+name: Build and Push Docker Image
+
+# ---------------------------------------------------------------------------
+# 触发条件
+#   push   main / master 分支 → 构建镜像，打上 1.0 与 latest 两个标签后推送
+#   workflow_dispatch         → 手动触发（可在 Actions 页面点按钮）
+#   pull_request              → 只构建不推送（验证 PR 能否编译通过）
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+# 同一分支的并发构建只保留最新一个
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: mailpool
+  # 镜像版本号（同时打这个 tag 和 latest）
+  IMAGE_VERSION: "1.0"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  build-and-push:
+    name: Build & Push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- 预检：语法 + 导入（快速失败，避免构建坏镜像）----
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Syntax check
+        run: python -m compileall -q app
+
+      - name: Import check
+        run: |
+          MAILPOOL_DATA=/tmp/mailpool-ci python -c "import app.main; print('import OK')"
+
+      # ---- Buildx ----
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---- 登录 Docker Hub（凭据来自 GitHub Secrets）----
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      # ---- 生成标签 ----
+      #   1.0        ← 固定版本号
+      #   latest     ← 主分支最新
+      #   sha-xxxxxx ← 便于回溯具体提交
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ env.IMAGE_VERSION }}
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=MailPool
+            org.opencontainers.image.description=Outlook mailbox pool service
+            org.opencontainers.image.version=${{ env.IMAGE_VERSION }}
+
+      # ---- 构建并推送 ----
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          {
+            echo "## 🐳 镜像构建完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 事件 | \`${{ github.event_name }}\` |"
+            echo "| 分支 | \`${{ github.ref_name }}\` |"
+            echo "| 提交 | \`${{ github.sha }}\` |"
+            echo "| 版本 | \`${{ env.IMAGE_VERSION }}\` |"
+            echo ""
+            if [ "${{ github.event_name }}" != "pull_request" ]; then
+              echo "### 已推送标签"
+              echo '```'
+              echo "${{ steps.meta.outputs.tags }}"
+              echo '```'
+            else
+              echo "> PR 仅验证构建，未推送。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # =========================================================================
+  # 冒烟测试：拉取刚推送的镜像跑起来，确认 0.0.0.0:18080 可访问
+  # =========================================================================
+  smoke-test:
+    name: Smoke Test
+    needs: build-and-push
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pull image
+        run: docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+
+      - name: Run container
+        run: |
+          docker run -d --name mailpool-smoke \
+            -p 18080:18080 \
+            -e MAILPOOL_ADMIN_PASSWORD='ci-smoke-test' \
+            -e MAILPOOL_DATA=/app/data \
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' mailpool-smoke 2>/dev/null || echo starting)
+            echo "[$i/30] health=$STATUS"
+            [ "$STATUS" = "healthy" ] && exit 0
+            [ "$STATUS" = "unhealthy" ] && { docker logs mailpool-smoke; exit 1; }
+            sleep 3
+          done
+          echo "健康检查超时"; docker logs mailpool-smoke; exit 1
+
+      - name: HTTP checks
+        run: |
+          set -e
+          curl -fsS -o /dev/null -w "  /login            HTTP %{http_code}\n" http://127.0.0.1:18080/login
+          curl -fsS -o /dev/null -w "  /api/product/info HTTP %{http_code}\n" http://127.0.0.1:18080/api/product/info
+          curl -fsS -o /dev/null -w "  /static/css       HTTP %{http_code}\n" http://127.0.0.1:18080/static/css/style.css
+          echo "✅ 冒烟测试通过"
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs mailpool-smoke
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f mailpool-smoke || true
