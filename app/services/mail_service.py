@@ -394,6 +394,13 @@ def list_mail_records(
     return list(db.scalars(stmt))
 
 
+def count_mail_records(db: Session) -> int:
+    """mail_records 总条数（分页用）。"""
+    from sqlalchemy import func
+
+    return db.scalar(select(func.count()).select_from(MailRecord)) or 0
+
+
 # ────────────────────────────────────────────────────────────────
 #  临时邮箱列表（按邮箱聚合，仿 MailNest /emails/temporary）
 # ────────────────────────────────────────────────────────────────

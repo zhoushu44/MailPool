@@ -21,20 +21,21 @@ from ..config import project_logo_src
 from ..database import get_db
 from ..models import MailRecord
 from ..providers import ProviderError
-from ..services import mail_service, pool_service
+from ..services import billing_service, mail_service, pool_service
 from ..timeutil import utc_iso
-from .auth import require_api_key
+from .auth import current_user, require_api_key
 
 logger = logging.getLogger(__name__)
 
 # ── 业务状态码（对齐 MailNest）──────────────────────────────
 CODE_OK = "00000"         # 请求成功
-CODE_BALANCE = "D0001"    # 余额不足（MailPool 无计费，保留占位）
+CODE_BALANCE = "D0001"    # 余额不足
 CODE_NO_STOCK = "D0002"   # 邮箱库存不足
 CODE_NO_PROJECT = "D0003" # 项目不存在或已停用
 CODE_OP_FAILED = "D0004"  # 当前无法对此邮箱执行该操作
 CODE_FETCH_FAILED = "D0005"  # 取件失败 请稍后再试
 CODE_BANNED = "D0006"     # 账号被封禁 取件失败
+CODE_PAYMENT = "D0007"    # 充值/支付流程错误
 CODE_SYSTEM = "99999"     # 系统异常
 
 
@@ -89,10 +90,11 @@ def product_info(db: Session = Depends(get_db)) -> dict[str, Any]:
     """查询可用的项目（临时邮箱）列表，无需 API Key。
 
     与 MailNest 对齐：`{"temporary": [...], "exclusive": {...}}`。
-    MailPool 无计费，price / duration 返回空或 null；固定号池给出实时 stock。
+    计费开启时 price 给出真实单价（元），关闭时为空串（免费）。
     """
     temporary = []
     stock_cache: dict[str, int] = {}   # 53 个项目共用 outlook 池，只查一次
+    billing_on = billing_service.is_billing_enabled(db)
     for p in mail_service.list_projects(db):
         if not p.enabled:
             continue
@@ -110,14 +112,16 @@ def product_info(db: Session = Depends(get_db)) -> dict[str, Any]:
             stock = None
         cfg = json.loads(p.config_json or "{}") if isinstance(p.config_json, str) else {}
         icon = project_logo_src(cfg.get("logo", "") if isinstance(cfg, dict) else "") or None
+        price_milli = billing_service.project_price(db, p) if billing_on else 0
+        original_milli = billing_service.to_milli(cfg.get("original_price")) if billing_on and cfg.get("original_price") else 0
         temporary.append({
             "code": p.code,
             "name": p.name,
             "query": (cfg.get("query", "") if isinstance(cfg, dict) else ""),
             "icon": icon,
             "stock": stock,
-            "price": "",
-            "original_price": "",
+            "price": billing_service.fmt_milli(price_milli) if billing_on else "",
+            "original_price": billing_service.fmt_milli(original_milli) if billing_on else "",
             "sender_domains": (cfg.get("sender_domains", "") if isinstance(cfg, dict) else ""),
             "mail_keywords": (cfg.get("mail_keywords", "") if isinstance(cfg, dict) else ""),
             "duration_seconds": None,
@@ -142,16 +146,38 @@ def _normalize_buy_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 @router.post("/email/temporary/buy")
-def buy_email(body: BuyBody, db: Session = Depends(get_db)) -> dict[str, Any]:
+def buy_email(
+    body: BuyBody,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+) -> dict[str, Any]:
     """按 project_code 取邮箱（临时源新建 / 固定池 claim）。
 
     count 支持 1-100，批量取号时返回数组。
+
+    计费：计费开启且 key 绑定了用户时，取号前先冻结（hold）。
+    余额不足 → 直接返回 D0001，**不会**把号发出去。
     """
     if body.count < 1 or body.count > 100:
         return err(CODE_OP_FAILED, "count 取值范围 1-100")
     project = mail_service.get_project(db, body.project_code.strip())
     if not project:
         return err(CODE_NO_PROJECT, "项目不存在或已停用")
+
+    billing_on = billing_service.is_billing_enabled(db)
+    price = billing_service.project_price(db, project) if billing_on else 0
+    user_id = user.id if (user is not None and billing_on) else 0
+
+    # 余额预检（批量时按单价 × count 估）
+    if billing_on and user is not None and price > 0:
+        need = price * body.count
+        if billing_service.available_balance(user) < need:
+            return err(
+                CODE_BALANCE,
+                f"余额不足，需要 {billing_service.fmt_milli(need)} 元，"
+                f"可用 {billing_service.fmt_milli(billing_service.available_balance(user))} 元",
+            )
+
     items = []
     failure: dict[str, Any] | None = None
     for _ in range(body.count):
@@ -167,6 +193,31 @@ def buy_email(body: BuyBody, db: Session = Depends(get_db)) -> dict[str, Any]:
                 mapped = _map_provider_error(exc)
                 failure = {"code": mapped["code"], "message": mapped["msg"]}
             break
+
+    if items and billing_on and user is not None:
+        # 取号成功后再冻结（每号一条订单）
+        charged: list[dict[str, Any]] = []
+        for item in items:
+            try:
+                billing_service.hold(
+                    db,
+                    user_id=user.id,
+                    email=item["email"],
+                    project_code=project.code,
+                    provider=project.provider,
+                    price=price,
+                )
+                charged.append(item)
+            except billing_service.InsufficientBalance as exc:
+                failure = {"code": CODE_BALANCE, "message": str(exc)}
+                break
+            except Exception as exc:
+                logger.warning("冻结失败 email=%s: %s", item.get("email"), exc)
+        items = charged
+        # 必须提交：request 作用域的 session 关闭时会回滚未提交的改动，
+        # 冻结记录和流水会一起丢掉（余额看着没动）。
+        db.commit()
+
     if failure and not items:
         return err(failure["code"], failure["message"])
     if failure:
@@ -182,7 +233,11 @@ def buy_email(body: BuyBody, db: Session = Depends(get_db)) -> dict[str, Any]:
 
 
 @router.post("/email/receive")
-def receive_code(body: ReceiveBody, db: Session = Depends(get_db)) -> dict[str, Any]:
+def receive_code(
+    body: ReceiveBody,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+) -> dict[str, Any]:
     """轮询等待验证码。
 
     返回约定（**重要**）：
@@ -195,6 +250,8 @@ def receive_code(body: ReceiveBody, db: Session = Depends(get_db)) -> dict[str, 
 
     data.elapsed 是本次实际耗时；它可能比 timeout 大几秒（最多约 +20s），
     因为要等当前这一轮 Graph/IMAP 轮询走完。客户端读超时请按 timeout + 30s 设置。
+
+    计费：收到验证码的瞬间真扣费（charge）——冻结转实扣。
     """
     project = mail_service.get_project(db, body.project_code.strip())
     if not project:
@@ -210,12 +267,27 @@ def receive_code(body: ReceiveBody, db: Session = Depends(get_db)) -> dict[str, 
     except ProviderError as exc:
         mapped = _map_provider_error(exc)
         return err(mapped["code"], mapped["msg"])
+
+    # 收到验证码 → 真扣费
+    if result.get("status") == "success" and user is not None and billing_service.is_billing_enabled(db):
+        try:
+            billing_service.charge(
+                db, user.id, body.email.strip(),
+                remark=f"收码扣费 {body.email.strip()}",
+            )
+            db.commit()
+        except Exception as exc:
+            logger.warning("扣费失败 email=%s: %s", body.email, exc)
     return ok(result)
 
 
 @router.post("/email/release")
-def release_email(body: ReleaseBody, db: Session = Depends(get_db)) -> dict[str, Any]:
-    """释放邮箱（临时源退还 / 固定池回池）。"""
+def release_email(
+    body: ReleaseBody,
+    db: Session = Depends(get_db),
+    user=Depends(current_user),
+) -> dict[str, Any]:
+    """释放邮箱（临时源退还 / 固定池回池）。计费：解冻，不扣钱。"""
     project = mail_service.get_project(db, body.project_code.strip())
     if not project:
         return err(CODE_NO_PROJECT, "项目不存在或已停用")
@@ -225,6 +297,17 @@ def release_email(body: ReleaseBody, db: Session = Depends(get_db)) -> dict[str,
         return _map_provider_error(exc)
     if result.get("status") == "not_found":
         return err(CODE_OP_FAILED, "当前无法对此邮箱执行该操作")
+
+    if user is not None and billing_service.is_billing_enabled(db):
+        try:
+            billing_service.release(
+                db, user.id, body.email.strip(),
+                remark=f"释放解冻 {body.email.strip()}",
+            )
+            db.commit()
+        except Exception as exc:
+            logger.warning("解冻失败 email=%s: %s", body.email, exc)
+
     pool_service.record_operation("release_count")
     return ok(result)
 

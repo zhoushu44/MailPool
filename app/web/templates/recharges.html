@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}余额与充值{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">余额与充值</div>
+        <div class="page-sub">充值到账后，取号先冻结、收到验证码才实扣</div>
+    </div>
+    <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+</div>
+
+<div class="card">
+    <div class="mn-list-head" style="margin:0 0 14px">
+        <div class="page-title" style="font-size:20px">{{ snapshot.balance }} <span style="font-size:14px">￥</span></div>
+    </div>
+    <div class="mn-account-grid">
+        <div class="mn-account-item"><span class="mn-account-label">可用余额</span><span class="mono">{{ snapshot.available_balance }} ￥</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">冻结余额</span><span class="mono">{{ snapshot.frozen_balance }} ￥</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">扫码充值</span><span class="mono">{{ snapshot.scan_recharge }} ￥</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">充值卡充值</span><span class="mono">{{ snapshot.card_recharge }} ￥</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">赠送金额</span><span class="mono">{{ snapshot.award_amount }} ￥</span></div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">扫码充值</div>
+    <div class="mn-filter-row">
+        <div>
+            <label>充值金额</label>
+            <input type="text" id="mn-topup-amount" placeholder="最低 {{ billing_config.min_topup }} 元" value="10.00">
+        </div>
+        <div>
+            <label>支付方式</label>
+            <select id="mn-topup-paytype">
+                {% for c in channels %}
+                <option value="{{ c.name }}">{{ c.display_name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div style="display:flex;align-items:flex-end">
+            <button class="btn" id="mn-topup-btn" {% if not channels %}disabled{% endif %} onclick="doTopup()">立即充值</button>
+        </div>
+    </div>
+    {% if not channels %}
+    <div class="mn-detail-hint" style="margin:10px 0 0">未配置易支付通道（billing.epay_url / pid / key），只能用充值卡充值。</div>
+    {% endif %}
+    <div id="mn-topup-result" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">充值卡充值</div>
+    <div class="mn-filter-row">
+        <div>
+            <label>卡密</label>
+            <input type="text" id="mn-card-key" placeholder="MP10-XXXX-XXXX" style="width:280px">
+        </div>
+        <div style="display:flex;align-items:flex-end">
+            <button class="btn" onclick="doRedeem()">兑换</button>
+        </div>
+    </div>
+</div>
+
+<div class="mn-table-card">
+    <div class="mn-list-head">
+        <div>
+            <div class="page-title" style="font-size:16px">充值订单</div>
+            <div class="page-sub">共 {{ total }} 笔</div>
+        </div>
+    </div>
+    {% if rows %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th style="width:48px">序号</th>
+                {% if is_admin %}<th>用户</th>{% endif %}
+                <th>订单号</th>
+                <th>订单金额</th>
+                <th>实际充值金额</th>
+                <th>支付方式</th>
+                <th>支付状态</th>
+                <th>订单创建时间</th>
+                <th>订单支付时间</th>
+            </tr></thead>
+            <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="mono">{{ (page - 1) * page_size + loop.index }}</td>
+                {% if is_admin %}
+                <td>{{ r.username or '—' }} <span class="mono" style="color:var(--muted,#94a3b8)">#{{ r.user_id }}</span></td>
+                {% endif %}
+                <td class="mono">{{ r.trade_no }}</td>
+                <td class="mono">{{ '%.3f'|format(r.amount / 1000) }}</td>
+                <td class="mono">{{ '%.3f'|format(r.money / 1000) }}</td>
+                <td>{% if r.pay_type == 'alipay' %}支付宝{% elif r.pay_type == 'wxpay' %}微信支付{% else %}{{ r.pay_type or '—' }}{% endif %}</td>
+                <td>
+                    {% if r.status == 'success' %}<span class="badge badge-available">已支付</span>
+                    {% elif r.status == 'failed' %}<span class="badge badge-dead">支付失败</span>
+                    {% else %}<span class="badge badge-using">待支付</span>{% endif %}
+                </td>
+                <td class="mono" style="white-space:nowrap">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else '—' }}</td>
+                <td class="mono" style="white-space:nowrap">{{ r.completed_at.strftime('%Y-%m-%d %H:%M:%S') if r.completed_at else '—' }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="mn-pager">
+        <span>每页 {{ page_size }} 条 · 共 {{ total }} 条</span>
+        <div class="btn-row">
+            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/recharges?page={{ page - 1 }}&page_size={{ page_size }}">上一页</a>{% endif %}
+            <span class="mn-pager-info">第 {{ page }} 页 / 共 {{ total_pages }} 页</span>
+            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/recharges?page={{ page + 1 }}&page_size={{ page_size }}">下一页</a>{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty">暂无充值订单</div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function doTopup() {
+    const btn = document.getElementById('mn-topup-btn');
+    const amount = (document.getElementById('mn-topup-amount').value || '').trim();
+    const payType = document.getElementById('mn-topup-paytype').value;
+    if (!amount) { toast('请输入充值金额', 'error'); return; }
+    if (!/^\d+(\.\d{1,2})?$/.test(amount)) { toast('充值金额最多支持 2 位小数', 'error'); return; }
+    btn.disabled = true;
+    try {
+        const res = await api('/api/v1/recharge/create', {
+            method: 'POST',
+            body: JSON.stringify({ amount: amount, pay_type: payType }),
+        });
+        const d = res.data;
+        if (d.key === 'urlscheme') {
+            // 生成表单自动提交跳网关
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = d.url;
+            for (const [k, v] of Object.entries(d.params || {})) {
+                const inp = document.createElement('input');
+                inp.type = 'hidden'; inp.name = k; inp.value = v;
+                form.appendChild(inp);
+            }
+            document.body.appendChild(form);
+            form.submit();
+        } else {
+            window.open(d.url, '_blank');
+        }
+    } catch (err) {
+        toast(err.message, 'error');
+        btn.disabled = false;
+    }
+}
+
+async function doRedeem() {
+    const key = (document.getElementById('mn-card-key').value || '').trim();
+    if (!key) { toast('请输入卡密', 'error'); return; }
+    try {
+        const res = await api('/api/v1/recharge/redeem-card', {
+            method: 'POST',
+            body: JSON.stringify({ card_key: key }),
+        });
+        toast(res.data.message || '兑换成功', 'success');
+        setTimeout(() => location.reload(), 800);
+    } catch (err) {
+        toast(err.message, 'error');
+    }
+}
+</script>
+{% endblock %}

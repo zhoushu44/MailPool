@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import STATIC_DIR, settings
 from .database import init_db
-from .api import admin_api, email_api
+from .api import admin_api, billing_admin_api, email_api, recharge_api
 from .web import routes
 
 logging.basicConfig(
@@ -34,7 +34,10 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 app.include_router(email_api.public_router)
 app.include_router(email_api.router)
+app.include_router(recharge_api.public_router)
+app.include_router(recharge_api.router)
 app.include_router(admin_api.router)
+app.include_router(billing_admin_api.router)
 app.include_router(routes.router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -44,7 +47,33 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # /api/admin/* 已有 router 级依赖；但 app/web/routes.py 的页面此前完全没有校验，
 # 任何人打开 /accounts、/settings、/pool 就能看到全部真实账号凭证。
 # 这里统一加一道中间件：除登录页/文档/静态资源/API 外，全部要求已授权。
-_PUBLIC_PREFIXES = ("/static", "/docs", "/api", "/login", "/logout", "/swagger", "/redoc", "/openapi.json")
+_PUBLIC_PREFIXES = (
+    "/static", "/docs", "/api", "/login", "/logout", "/swagger", "/redoc", "/openapi.json",
+    "/user/login", "/user/logout",
+)
+
+# 客户自助页：登录了客户账号就能看，不需要管理员口令。
+# 这些页面只读自己的余额/流水/订单，不碰号池凭证。
+_CUSTOMER_PATHS = ("/recharges", "/balances", "/user/")
+
+
+def _customer_logged_in(request: Request) -> bool:
+    """会话里有没有有效的客户身份。"""
+    from .database import SessionLocal
+    from .models import User
+    from .web.session import get_session
+
+    uid = get_session(request).get("user_id")
+    if not uid:
+        return False
+    db = SessionLocal()
+    try:
+        user = db.get(User, int(uid))
+        return user is not None and user.status == 1
+    except Exception:
+        return False
+    finally:
+        db.close()
 
 
 @app.middleware("http")
@@ -54,17 +83,22 @@ async def admin_page_guard(request: Request, call_next):
     path = request.url.path
     if path.startswith(_PUBLIC_PREFIXES):
         return await call_next(request)
-    if not check_admin_access(request):
-        if settings.admin_password:
-            return RedirectResponse("/login", status_code=303)
-        client = request.client.host if request.client else "未知"
-        return HTMLResponse(
-            "<h1>403 仅允许本机访问</h1>"
-            f"<p>后台未设置 MAILPOOL_ADMIN_PASSWORD，当前仅允许回环地址访问（当前来源：{client}）。</p>"
-            "<p>如需远程访问，请设置环境变量 MAILPOOL_ADMIN_PASSWORD 后重启服务。</p>",
-            status_code=403,
-        )
-    return await call_next(request)
+    if check_admin_access(request):
+        return await call_next(request)
+    # 客户自助页：客户登录后放行
+    if path.startswith(_CUSTOMER_PATHS) and _customer_logged_in(request):
+        return await call_next(request)
+    if settings.admin_password:
+        if path.startswith(_CUSTOMER_PATHS):
+            return RedirectResponse("/user/login", status_code=303)
+        return RedirectResponse("/login", status_code=303)
+    client = request.client.host if request.client else "未知"
+    return HTMLResponse(
+        "<h1>403 仅允许本机访问</h1>"
+        f"<p>后台未设置 MAILPOOL_ADMIN_PASSWORD，当前仅允许回环地址访问（当前来源：{client}）。</p>"
+        "<p>如需远程访问，请设置环境变量 MAILPOOL_ADMIN_PASSWORD 后重启服务。</p>",
+        status_code=403,
+    )
 
 
 @app.on_event("startup")
@@ -172,13 +206,37 @@ def _start_heartbeat_scheduler() -> None:
         finally:
             db.close()
 
+    def _release_expired_job():
+        """定时释放超时的待扣费订单（解冻，不扣钱）。
+
+        邮件没来的订单会一直挂着冻结余额，释放掉才不会把用户的钱锁死。
+        """
+        from .database import SessionLocal
+        from .services import billing_service, settings_service
+
+        db = SessionLocal()
+        try:
+            if not billing_service.is_billing_enabled(db):
+                return
+            cfg = settings_service.get_billing_config(db)
+            timeout = int(cfg.get("hold_timeout") or 1200)
+            count = billing_service.release_expired(db, timeout_seconds=timeout)
+            if count:
+                logger.info("超时订单自动释放: %d 单（解冻不扣费）", count)
+        except Exception as e:
+            logger.error("超时订单释放任务异常: %s", e)
+        finally:
+            db.close()
+
     scheduler = BackgroundScheduler()
     # 每 5 分钟检查一次，由各 job 自己判断是否落在配置窗口内
     scheduler.add_job(_heartbeat_job, CronTrigger(minute="*/5"))
     scheduler.add_job(_health_check_job, CronTrigger(minute="*/5"))
     scheduler.add_job(_refresh_token_job, CronTrigger(minute="*/5"))
+    # 超时释放：每分钟跑一次（不依赖配置窗口）
+    scheduler.add_job(_release_expired_job, CronTrigger(minute="*"))
     scheduler.start()
-    logger.info("调度器已启动（心跳保活 + 健康扫描 + 定时刷新，每 5 分钟检查配置）")
+    logger.info("调度器已启动（心跳保活 + 健康扫描 + 定时刷新 + 超时释放，每 5 分钟检查配置）")
 
 
 @app.get("/api")

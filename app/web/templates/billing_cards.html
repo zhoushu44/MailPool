@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}充值卡{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">充值卡</div>
+        <div class="page-sub">不依赖支付通道也能卖钱：批量生成卡密，用户自己兑换</div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">生成充值卡</div>
+    <div class="mn-filter-row">
+        <div><label>面额（元）</label><input type="text" id="mn-card-amount" value="10.00"></div>
+        <div><label>数量</label><input type="text" id="mn-card-count" value="10"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="genCards()">生成</button></div>
+    </div>
+    <div id="mn-card-output" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">查询卡密</div>
+    <div class="mn-filter-row">
+        <div><label>卡密或批次 ID</label><input type="text" id="mn-card-query" placeholder="MP10-XXXX-XXXX 或 B1700000000" style="width:320px"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="queryCard()">查询</button></div>
+    </div>
+    <div id="mn-card-query-out" style="margin-top:12px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">计费配置</div>
+    <div class="mn-filter-row">
+        <div><label>计费开关</label>
+            <select id="mn-cfg-enabled">
+                <option value="false" {% if billing_config.enabled != 'true' %}selected{% endif %}>关闭（免费发放）</option>
+                <option value="true" {% if billing_config.enabled == 'true' %}selected{% endif %}>开启（计费）</option>
+            </select>
+        </div>
+        <div><label>默认单价（元）</label><input type="text" id="mn-cfg-price" value="{{ billing_config.default_price }}"></div>
+        <div><label>最小充值</label><input type="text" id="mn-cfg-min" value="{{ billing_config.min_topup }}"></div>
+        <div><label>最大充值</label><input type="text" id="mn-cfg-max" value="{{ billing_config.max_topup }}"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="saveCfg()">保存</button></div>
+    </div>
+    <div class="mn-filter-row" style="margin-top:10px">
+        <div style="flex:1"><label>易支付网关地址</label><input type="text" id="mn-cfg-epay" value="{{ billing_config.epay_url }}" placeholder="https://pay.example.com" style="width:100%"></div>
+        <div><label>PID</label><input type="text" id="mn-cfg-pid" value="{{ billing_config.epay_pid }}"></div>
+        <div><label>KEY</label><input type="text" id="mn-cfg-key" value="{{ billing_config.epay_key }}"></div>
+    </div>
+    <div class="mn-filter-row" style="margin-top:10px">
+        <div style="flex:1"><label>本站对外地址（用于拼回调地址）</label><input type="text" id="mn-cfg-site" value="{{ billing_config.site_url }}" placeholder="http://127.0.0.1:18080" style="width:100%"></div>
+        <div><label>冻结超时（秒）</label><input type="text" id="mn-cfg-timeout" value="{{ billing_config.hold_timeout }}"></div>
+    </div>
+    <div class="mn-detail-hint" style="margin:10px 0 0">
+        回调地址：<code class="mono">{{ billing_config.site_url or '未配置' }}/api/v1/recharge/notify</code>
+        —— 必须能被支付网关访问到，否则钱到不了账。
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function genCards() {
+    const amount = (document.getElementById('mn-card-amount').value || '').trim();
+    const count = parseInt(document.getElementById('mn-card-count').value || '0', 10);
+    if (!amount) { toast('请输入面额', 'error'); return; }
+    if (!count || count < 1) { toast('请输入数量', 'error'); return; }
+    try {
+        const res = await api('/api/admin/billing/cards/generate', {
+            method: 'POST',
+            body: JSON.stringify({ amount: amount, count: count }),
+        });
+        const d = res.data;
+        const text = d.keys.join('\n');
+        let html = '<div class="card-title">批次 ' + escHtml(d.batch_id) + '（' + d.count + ' 张）</div>'
+            + '<textarea readonly style="width:100%;height:200px;font-family:monospace">' + escHtml(text) + '</textarea>'
+            + '<div class="btn-row" style="margin-top:8px"><button class="btn btn-sm btn-ghost" onclick="copyText(' + JSON.stringify(text) + ')">复制全部</button></div>';
+        document.getElementById('mn-card-output').innerHTML = html;
+        toast('充值卡生成成功', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+function copyText(text) {
+    navigator.clipboard.writeText(text).then(() => toast('已复制', 'success')).catch(() => toast('复制失败', 'error'));
+}
+
+async function queryCard() {
+    const q = (document.getElementById('mn-card-query').value || '').trim();
+    if (!q) { toast('请输入卡密', 'error'); return; }
+    try {
+        const res = await api('/api/admin/billing/cards/query?card_no=' + encodeURIComponent(q));
+        const d = res.data;
+        let html = '<div class="card-title">批次 ' + escHtml(d.batch_id || '—') + '</div><div class="table-wrap"><table><thead><tr><th>卡密</th><th>面额</th><th>状态</th></tr></thead><tbody>';
+        const cards = d.cards || [d];
+        for (const c of cards) {
+            html += '<tr><td class="mono">' + escHtml(c.card_key) + '</td><td class="mono">' + escHtml(c.amount) + '</td><td>' + escHtml(c.status) + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        document.getElementById('mn-card-query-out').innerHTML = html;
+    } catch (err) {
+        document.getElementById('mn-card-query-out').innerHTML = '<div class="empty">' + escHtml(err.message) + '</div>';
+    }
+}
+
+async function saveCfg() {
+    try {
+        await api('/api/admin/billing/config', {
+            method: 'PUT',
+            body: JSON.stringify({
+                enabled: document.getElementById('mn-cfg-enabled').value,
+                default_price: document.getElementById('mn-cfg-price').value,
+                min_topup: document.getElementById('mn-cfg-min').value,
+                max_topup: document.getElementById('mn-cfg-max').value,
+                epay_url: document.getElementById('mn-cfg-epay').value,
+                epay_pid: document.getElementById('mn-cfg-pid').value,
+                epay_key: document.getElementById('mn-cfg-key').value,
+                site_url: document.getElementById('mn-cfg-site').value,
+                hold_timeout: document.getElementById('mn-cfg-timeout').value,
+            }),
+        });
+        toast('已保存', 'success');
+        location.reload();
+    } catch (err) { toast(err.message, 'error'); }
+}
+</script>
+{% endblock %}

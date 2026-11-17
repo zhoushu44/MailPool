@@ -4,9 +4,45 @@
 <div class="mn-list-head">
     <div>
         <div class="page-title">费用明细</div>
-        <div class="page-sub">查看你的费用明细（未接入计费，以下为收件流水，全部免费）</div>
+        <div class="page-sub">
+            {% if billing_on %}
+            每一笔余额变动都有据可查：取号冻结、收到验证码实扣、释放解冻、充值到账
+            {% else %}
+            未接入计费，以下为收件流水，全部免费
+            {% endif %}
+        </div>
     </div>
     <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+</div>
+
+{% if billing_on %}
+<div class="card">
+    <div class="card-title">余额总览</div>
+    <div class="mn-account-grid">
+        <div class="mn-account-item"><span class="mn-account-label">总余额：</span><span class="mono">{{ snapshot.balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">可用余额：</span><span class="mono">{{ snapshot.available_balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">冻结余额：</span><span class="mono">{{ snapshot.frozen_balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">扫码充值：</span><span class="mono">{{ snapshot.scan_recharge }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">充值卡：</span><span class="mono">{{ snapshot.card_recharge }} 元</span></div>
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <form method="get" class="mn-filter-row">
+        <div>
+            <label>类型</label>
+            <select name="log_type">
+                <option value="">全部</option>
+                <option value="recharge" {% if log_type == 'recharge' %}selected{% endif %}>充值到账</option>
+                <option value="hold" {% if log_type == 'hold' %}selected{% endif %}>取号冻结</option>
+                <option value="charge" {% if log_type == 'charge' %}selected{% endif %}>收码实扣</option>
+                <option value="release" {% if log_type == 'release' %}selected{% endif %}>释放解冻</option>
+                <option value="redeem" {% if log_type == 'redeem' %}selected{% endif %}>充值卡兑换</option>
+            </select>
+        </div>
+        <div style="display:flex;align-items:flex-end"><button type="submit" class="btn">筛选</button></div>
+    </form>
 </div>
 
 <div class="mn-table-card">
@@ -15,6 +51,7 @@
         <table>
             <thead><tr>
                 <th style="width:48px">序号</th>
+                {% if is_admin %}<th>用户</th>{% endif %}
                 <th>类型</th>
                 <th>金额</th>
                 <th>变动前余额</th>
@@ -28,18 +65,30 @@
             {% for r in records %}
             <tr>
                 <td class="mono">{{ (page - 1) * page_size + loop.index }}</td>
-                <td><span class="badge badge-temp">收件</span></td>
-                <td><span class="mono mn-price-free">免费</span></td>
-                <td class="mono">—</td>
-                <td class="mono">—</td>
-                <td class="mono">—</td>
-                <td class="mono">—</td>
+                {% if is_admin %}
+                <td>{{ r.username or '—' }} <span class="mono" style="color:var(--muted,#94a3b8)">#{{ r.user_id }}</span></td>
+                {% endif %}
                 <td>
-                    <a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}{% if r.project_code %}&project_code={{ r.project_code|urlencode }}{% endif %}">{{ r.email }}</a>
-                    {% if r.project_code %}<span class="mn-count">{{ r.project_code }}</span>{% endif %}
-                    {% if r.code %}<span class="badge badge-code">{{ r.code }}</span>{% endif %}
+                    {% if r.log_type == 'recharge' %}<span class="badge badge-available">充值</span>
+                    {% elif r.log_type == 'hold' %}<span class="badge badge-using">冻结</span>
+                    {% elif r.log_type == 'charge' %}<span class="badge badge-dead">扣费</span>
+                    {% elif r.log_type == 'release' %}<span class="badge badge-temp">释放</span>
+                    {% elif r.log_type == 'redeem' %}<span class="badge badge-code">兑换</span>
+                    {% else %}<span class="badge badge-temp">{{ r.log_type or '收件' }}</span>{% endif %}
                 </td>
-                <td class="mono" style="white-space:nowrap">{{ r.received_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td class="mono">
+                    {% if r.log_type and r.log_type != 'hold' and r.log_type != 'release' %}
+                        <span class="{{ 'mn-price-free' if r.amount == '0.000' else '' }}">{{ r.amount }}</span>
+                    {% else %}
+                        <span class="mn-price-free">{{ r.amount }}</span>
+                    {% endif %}
+                </td>
+                <td class="mono">{{ r.balance_before }}</td>
+                <td class="mono">{{ r.balance_after }}</td>
+                <td class="mono">{{ r.frozen_before }}</td>
+                <td class="mono">{{ r.frozen_after }}</td>
+                <td>{{ r.remark or '—' }}</td>
+                <td class="mono" style="white-space:nowrap">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') if r.created_at else '—' }}</td>
             </tr>
             {% endfor %}
             </tbody>
@@ -49,9 +98,9 @@
     <div class="mn-pager">
         <span>每页 {{ page_size }} 条 · 共 {{ total }} 条明细</span>
         <div class="btn-row">
-            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page - 1 }}&page_size={{ page_size }}">上一页</a>{% endif %}
+            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page - 1 }}&page_size={{ page_size }}{% if log_type %}&log_type={{ log_type }}{% endif %}">上一页</a>{% endif %}
             <span class="mn-pager-info">第 {{ page }} 页 / 共 {{ total_pages }} 页</span>
-            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page + 1 }}&page_size={{ page_size }}">下一页</a>{% endif %}
+            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/balances?page={{ page + 1 }}&page_size={{ page_size }}{% if log_type %}&log_type={{ log_type }}{% endif %}">下一页</a>{% endif %}
         </div>
     </div>
     {% else %}

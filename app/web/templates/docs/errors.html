@@ -10,15 +10,30 @@
         <thead><tr><th>code</th><th>说明</th></tr></thead>
         <tbody>
             <tr><td><code>00000</code></td><td>请求成功</td></tr>
-            <tr><td><code>D0001</code></td><td>余额不足（预留位，MailPool 无计费体系）</td></tr>
+            <tr><td><code>D0001</code></td><td>余额不足（计费开启且可用余额不足以冻结单价时返回，<strong>不会发货</strong>）</td></tr>
             <tr><td><code>D0002</code></td><td>邮箱库存不足（固定号池无未使用过的账号）</td></tr>
             <tr><td><code>D0003</code></td><td>项目不存在或已停用</td></tr>
             <tr><td><code>D0004</code></td><td>当前无法对此邮箱执行该操作</td></tr>
             <tr><td><code>D0005</code></td><td>取件失败 请稍后再试</td></tr>
             <tr><td><code>D0006</code></td><td>账号被封禁 取件失败</td></tr>
+            <tr><td><code>D0007</code></td><td>充值 / 支付流程错误（签名校验失败、金额不符、卡密无效等）</td></tr>
             <tr><td><code>99999</code></td><td>系统异常</td></tr>
         </tbody>
     </table>
+</section>
+
+<section class="doc-section">
+    <h2>计费说明</h2>
+    <p>计费采用 MailNest 的三段式：<strong>取号不扣钱，只冻结；收到验证码才真扣</strong>。</p>
+    <table class="doc-table">
+        <thead><tr><th>阶段</th><th>触发</th><th>余额</th><th>冻结</th><th>订单状态</th></tr></thead>
+        <tbody>
+            <tr><td>hold</td><td><code>POST /api/v1/email/temporary/buy</code></td><td>不变</td><td>+单价</td><td><code>pending</code></td></tr>
+            <tr><td>charge</td><td>receive 拿到验证码</td><td>-单价</td><td>-单价</td><td><code>charged</code></td></tr>
+            <tr><td>release</td><td><code>POST /api/v1/email/release</code> 或超时（默认 20 分钟）</td><td>不变</td><td>-单价</td><td><code>free</code></td></tr>
+        </tbody>
+    </table>
+    <p>计费未开启时（默认），全部接口保持免费发放行为，<code>price</code> 返回空串。</p>
 </section>
 
 <section class="doc-section">
@@ -58,6 +73,22 @@
     <pre class="doc-code">{
     "code": "D0005",
     "msg": "取件失败 请稍后再试",
+    "type": "error",
+    "data": null
+}</pre>
+
+    <h3>余额不足</h3>
+    <pre class="doc-code">{
+    "code": "D0001",
+    "msg": "余额不足，需要 0.018 元，可用 0.000 元",
+    "type": "error",
+    "data": null
+}</pre>
+
+    <h3>充值回调签名校验失败</h3>
+    <pre class="doc-code">{
+    "code": "D0007",
+    "msg": "签名校验失败",
     "type": "error",
     "data": null
 }</pre>

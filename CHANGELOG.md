@@ -4,6 +4,51 @@
 
 ---
 
+## [Unreleased]
+
+### 新增
+
+**计费体系（充值抄 new-api，扣费抄 MailNest）**
+
+- 金额一律用**整数厘**存储（`MONEY_SCALE = 1000`），杜绝 float 累加漂移，取整走 `ROUND_HALF_UP`
+- 新增 6 张表：`users`、`api_keys`、`recharge_orders`、`redeem_cards`、`email_orders`、`balance_logs`
+- **三段式扣费**（MailNest 模型）：取号只冻结（`frozen += 单价`，`balance` 不变，订单 `pending`）→ 收到验证码才真扣（`charged`）→ 释放或超时只解冻（`free`）
+- 冻结超时自动释放（默认 1200 秒，调度器每分钟检查），防止用户取了号不收码把余额锁死
+- **充值**（new-api 模型）：易支付（epay）MD5 签名下单 + 回调幂等到账、`trade_no` 唯一约束、充值卡批量生成/兑换、管理员人工补单/置失败
+- 回调流程：验签 → 查单 → **校验金额** → 幂等状态检查 → 加钱写流水（金额校验必须在状态检查之前，防篡改金额的重复回调）
+- 客户自助页：`/user/login` 登录、`/recharges`（余额与充值）、`/balances`（费用明细）
+- 管理页：`/billing/users`（用户余额 + 流水 + 调整 + 签发 Key）、`/billing/cards`（充值卡生成 + 计费配置）
+- API Key 绑定用户身份，扣费自动记到该用户名下；老的裸 Key 视为匿名
+- 充值接口认两种身份：绑定用户的 API Key **或**网页登录会话（客户在后台页面上自己充值）
+- `D0001` 由「预留位」改为真实的**余额不足**（不发货），新增 `D0007` 充值/支付流程错误
+- 计费**默认关闭**（`billing.enabled = false`），老部署行为完全不变
+- 余额六栏（balance/available/frozen/scan/card/award）全部从 `balance_logs` 流水推导，流水是唯一事实来源
+- 设计文档：`docs/billing.md`；参考源码：`docs/reference/`
+
+**测试**
+
+- `tests/api/test_billing.py` —— 16 个计费端到端用例（临时库 + 保险丝，绝不碰生产库）
+- `tests/api/test_billing_ui.py` —— 4 个 Playwright 真实页面交互用例（自起隔离服务）
+- 全量 `python -m pytest tests/ -q` → **39 passed**
+
+### 修复
+
+**测试污染生产库（高危）**
+
+- `tests/api/test_mailpool_db.py` 原来是「脚本」：import 时直连**生产库** `data/mailpool.db` 并 `exit()`，
+  pytest 收集到它会 `INTERNALERROR`，整套测试根本跑不起来。
+  改为正经 pytest 用例：只读、复制生产库到临时目录再查、失败用 assert 报告。
+- `tests/api/test_mailpool_full.py` 更危险：`BASE` 写死 `127.0.0.1:18080`，
+  会 **PATCH 生产账号的标签**、还触发 **995 个号的全量刷新**。
+  改为自起 uvicorn 子进程 + 独立临时库，种子数据走应用自己的导入 API，用例只碰自己的种子数据。
+
+### 变更
+
+- 管理视角的「下单流水 / 费用明细 / 余额与充值」现在看**全部客户**的数据（原来只按自己的 user_id 过滤，管理员看是空的）
+- 「累计充值」改为由 `credit()` 统一维护（充值/兑换/赠送/管理员手动充值都计入）
+
+---
+
 ## [1.0] - 2026-11-16
 
 首个正式发布版本。

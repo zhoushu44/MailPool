@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..config import PROJECT_LOGOS, STATIC_DIR, TEMPLATE_DIR, project_logo_src
 from ..database import get_db
 from ..providers import get_provider_class, list_providers
-from ..services import mail_service, pool_service, settings_service
+from ..services import billing_service, mail_service, pool_service, settings_service
 from .session import clear_session, get_session, set_session
 
 router = APIRouter()
@@ -17,6 +17,20 @@ router = APIRouter()
 # 开着 auto_reload 时每个请求都要 stat 一遍全部模板文件（bind mount / 网络盘上很慢）。
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 templates.env.auto_reload = False
+
+
+def _current_user_id(request: Request, db: Session) -> int | None:
+    """当前登录用户 id（会话里的 user_id）。
+
+    没登录返回 None —— 计费页面按 0 处理（查不到流水）。
+    """
+    uid = get_session(request).get("user_id")
+    if not uid:
+        return None
+    try:
+        return int(uid)
+    except (TypeError, ValueError):
+        return None
 
 
 def asset_version() -> str:
@@ -35,6 +49,22 @@ PUBLIC_PATHS = {"/login", "/logout"}
 
 def _admin_ok(request: Request) -> bool:
     return bool(get_session(request).get("admin_ok"))
+
+
+def _user_name_map(db: Session, limit: int = 500) -> dict[int, str]:
+    """用户 id → 用户名 的映射（管理页显示用）。"""
+    users, _ = billing_service.list_users(db, limit=limit)
+    return {u.id: u.username for u in users}
+
+
+def _is_admin(request: Request) -> bool:
+    """当前请求是不是管理员（会话登录 或 带了正确的管理员口令头）。
+
+    管理员能看全局数据（所有客户的订单/流水），客户只能看自己的。
+    """
+    from ..api.auth import check_admin_access
+
+    return check_admin_access(request)
 
 
 def _render(request: Request, template: str, **ctx):
@@ -69,7 +99,10 @@ def login_submit(
 
     if settings.admin_password and secrets.compare_digest(password, settings.admin_password):
         response = RedirectResponse("/", status_code=303)
-        set_session(response, {"admin_ok": True})
+        # 合并而不是覆盖：管理员与客户可能共用同一个 cookie
+        sess = get_session(request)
+        sess["admin_ok"] = True
+        set_session(response, sess)
         return response
     return _render(request, "login.html", error="口令错误")
 
@@ -78,6 +111,48 @@ def login_submit(
 def logout(request: Request):
     response = RedirectResponse("/login", status_code=303)
     clear_session(response)
+    return response
+
+
+# ── 用户登录（客户自助查余额 / 充值）───────────────────────────
+
+
+@router.get("/user/login", response_class=HTMLResponse)
+def user_login_page(request: Request):
+    return _render(request, "user_login.html")
+
+
+@router.post("/user/login")
+def user_login_submit(
+    request: Request,
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """客户登录。成功后会话里记 user_id，充值/流水页按这个身份查。"""
+    from ..api.billing_admin_api import verify_password
+
+    user = billing_service.get_user_by_name(db, username.strip())
+    if user is None or user.status != 1 or not user.password_hash:
+        return _render(request, "user_login.html", error="用户名或密码错误", username=username)
+    if not verify_password(password, user.password_hash):
+        return _render(request, "user_login.html", error="用户名或密码错误", username=username)
+    sess = get_session(request)
+    sess["user_id"] = user.id
+    sess["username"] = user.username
+    response = RedirectResponse("/recharges", status_code=303)
+    set_session(response, sess)
+    return response
+
+
+@router.get("/user/logout")
+def user_logout(request: Request):
+    """退出客户登录（不影响管理员身份）。"""
+    sess = get_session(request)
+    sess.pop("user_id", None)
+    sess.pop("username", None)
+    response = RedirectResponse("/user/login", status_code=303)
+    set_session(response, sess)
     return response
 
 
@@ -211,6 +286,7 @@ def buy_email_page(request: Request, db: Session = Depends(get_db)):
 
     projects = mail_service.list_projects(db)
     avail_cache: dict[str, int] = {}
+    billing_on = billing_service.is_billing_enabled(db)
     for p in projects:
         _attach_project_meta(db, p, avail_cache)
         try:
@@ -220,10 +296,17 @@ def buy_email_page(request: Request, db: Session = Depends(get_db)):
         p.card_query = cfg.get("query", "") or cfg.get("sender_domains", "")
         p.card_keywords = cfg.get("mail_keywords", "") or ""
         p.card_duration = (cfg.get("timeout") or "") or (settings.default_timeout if hasattr(settings, "default_timeout") else "")
+        # 真实单价（计费关闭时为空串 → 页面显示「免费」）
+        price_milli = billing_service.project_price(db, p) if billing_on else 0
+        p.card_price = billing_service.fmt_milli(price_milli) if billing_on else ""
+        orig = cfg.get("original_price") if billing_on else ""
+        p.card_original_price = (
+            billing_service.fmt_milli(billing_service.to_milli(orig)) if orig else ""
+        )
     providers = list_providers()
     return _render(
         request, "buy_email.html", active="buy-email",
-        projects=projects, providers=providers,
+        projects=projects, providers=providers, billing_on=billing_on,
     )
 
 
@@ -235,22 +318,60 @@ def orders_page(
     page_size: int = 20,
     db: Session = Depends(get_db),
 ):
-    """下单流水页（仿 MailNest /orders）：按邮箱聚合的取号记录。"""
+    """下单流水页（仿 MailNest /orders）。
+
+    计费开启时读 email_orders（真订单：价格 + 计费状态 pending/charged/free）；
+    计费关闭时回落到 email_usages（纯取号记录）。
+
+    管理员看全部客户的订单；客户只看自己的。
+    """
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
-    rows, total = mail_service.list_email_summaries(
-        db,
-        project_code=project_code or None,
-        limit=page_size,
-        offset=(page - 1) * page_size,
-    )
     projects = mail_service.list_projects(db)
+    billing_on = billing_service.is_billing_enabled(db)
+    uid = _current_user_id(request, db) or 0
+    is_admin = _is_admin(request)
+
+    if billing_on:
+        orders, total = billing_service.list_email_orders(
+            db, None if is_admin else uid,
+            limit=page_size, offset=(page - 1) * page_size,
+            project_code=project_code or None,
+        )
+        proj_names = {p.code: p.name or p.code for p in projects}
+        user_names = {}
+        if is_admin:
+            user_names = _user_name_map(db)
+        rows = [
+            {
+                "email": o.email,
+                "project_code": o.project_code,
+                "project_name": proj_names.get(o.project_code, o.project_code),
+                "price": billing_service.fmt_milli(o.price),
+                "billing_status": o.billing_status,
+                "charged_amount": billing_service.fmt_milli(o.charged_amount),
+                "first_used_at": o.created_at,
+                "last_received_at": o.charged_at,
+                "code": "",
+                "mail_count": 0,
+                "user_id": o.user_id,
+                "username": user_names.get(o.user_id, ""),
+            }
+            for o in orders
+        ]
+    else:
+        rows, total = mail_service.list_email_summaries(
+            db,
+            project_code=project_code or None,
+            limit=page_size,
+            offset=(page - 1) * page_size,
+        )
     total_pages = max(1, (total + page_size - 1) // page_size)
     return _render(
         request, "orders.html", active="orders",
         rows=rows, total=total, page=page, page_size=page_size,
         total_pages=total_pages, projects=projects,
-        filter_project=project_code,
+        filter_project=project_code, billing_on=billing_on, is_admin=is_admin,
     )
 
 
@@ -259,33 +380,162 @@ def balances_page(
     request: Request,
     page: int = 1,
     page_size: int = 20,
+    log_type: str = "",
     db: Session = Depends(get_db),
 ):
-    """费用明细页（仿 MailNest /balances）：未接入计费，展示收件流水。"""
+    """费用明细页（仿 MailNest /balances）：真余额流水。
+
+    计费开启时读 balance_logs（带变动前后余额/冻结额）；
+    计费关闭时回落到 mail_records（纯收件流水，全部免费）。
+
+    管理员看全部客户的流水；客户只看自己的。
+    """
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
-    records = mail_service.list_mail_records(
-        db, limit=page_size, offset=(page - 1) * page_size,
-    )
-    from sqlalchemy import func, select
-    from ..models import MailRecord
-    total = db.scalar(select(func.count()).select_from(MailRecord)) or 0
+    from ..config import settings
+
+    billing_on = billing_service.is_billing_enabled(db)
+    is_admin = _is_admin(request)
+    uid = _current_user_id(request, db) or 0
+    if billing_on:
+        rows, total = billing_service.list_balance_logs(
+            db, None if is_admin else uid,
+            limit=page_size, offset=(page - 1) * page_size,
+            log_type=log_type or None,
+        )
+        user_names = {}
+        if is_admin:
+            user_names = _user_name_map(db)
+        records = []
+        for r in rows:
+            records.append({
+                "id": r.id,
+                "log_type": r.log_type,
+                "amount": billing_service.fmt_milli(r.amount),
+                "balance_before": billing_service.fmt_milli(r.balance_before),
+                "balance_after": billing_service.fmt_milli(r.balance_after),
+                "frozen_before": billing_service.fmt_milli(r.frozen_before),
+                "frozen_after": billing_service.fmt_milli(r.frozen_after),
+                "remark": r.remark,
+                "user_id": r.user_id,
+                "username": user_names.get(r.user_id, ""),
+                "created_at": r.created_at,
+            })
+    else:
+        recs = mail_service.list_mail_records(
+            db, limit=page_size, offset=(page - 1) * page_size,
+        )
+        total = mail_service.count_mail_records(db)
+        records = [
+            {
+                "id": r.id,
+                "log_type": "",
+                "amount": "免费",
+                "balance_before": "—",
+                "balance_after": "—",
+                "frozen_before": "—",
+                "frozen_after": "—",
+                "remark": f"{r.email} {r.project_code}".strip(),
+                "created_at": r.received_at,
+            }
+            for r in recs
+        ]
     total_pages = max(1, (total + page_size - 1) // page_size)
+    snapshot = billing_service.balance_snapshot(db, _current_user_id(request, db) or 0)
     return _render(
         request, "balances.html", active="balances",
         records=records, total=total, page=page, page_size=page_size,
-        total_pages=total_pages,
+        total_pages=total_pages, billing_on=billing_on, snapshot=snapshot,
+        log_type=log_type, is_admin=is_admin,
+    )
+
+
+@router.get("/recharges", response_class=HTMLResponse)
+def recharges_page(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    """余额与充值页（仿 MailNest /recharges）。
+
+    客户看自己的余额和充值订单；管理员看全部客户的充值订单。
+    """
+    page = max(1, page)
+    page_size = min(max(1, page_size), 100)
+    uid = _current_user_id(request, db) or 0
+    is_admin = _is_admin(request)
+    snapshot = billing_service.balance_snapshot(db, uid)
+    rows, total = billing_service.list_recharge_orders(
+        db, user_id=None if is_admin else (uid or None),
+        limit=page_size, offset=(page - 1) * page_size
+    )
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    from ..services import payment_service
+
+    user_names = {}
+    if is_admin:
+        user_names = _user_name_map(db)
+    for r in rows:
+        r.username = user_names.get(r.user_id, "")
+
+    return _render(
+        request, "recharges.html", active="recharges",
+        snapshot=snapshot, rows=rows, total=total, page=page,
+        page_size=page_size, total_pages=total_pages,
+        channels=payment_service.list_channels(db),
+        billing_config=settings_service.get_billing_config(db),
+        is_admin=is_admin,
+    )
+
+
+@router.get("/billing/users", response_class=HTMLResponse)
+def billing_users_page(
+    request: Request,
+    page: int = 1,
+    page_size: int = 50,
+    db: Session = Depends(get_db),
+):
+    """用户余额管理（后台）。"""
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+    rows, total = billing_service.list_users(db, limit=page_size, offset=(page - 1) * page_size)
+    return _render(
+        request, "billing_users.html", active="billing-users",
+        rows=rows, total=total, page=page, page_size=page_size,
+        total_pages=max(1, (total + page_size - 1) // page_size),
+    )
+
+
+@router.get("/billing/cards", response_class=HTMLResponse)
+def billing_cards_page(request: Request, db: Session = Depends(get_db)):
+    """充值卡管理（后台）。"""
+    from ..services import payment_service
+
+    return _render(
+        request, "billing_cards.html", active="billing-cards",
+        billing_config=settings_service.get_billing_config(db),
+        payment_service=payment_service,
     )
 
 
 @router.get("/account", response_class=HTMLResponse)
 def account_page(request: Request, db: Session = Depends(get_db)):
-    """账户资料页（仿 MailNest /account）：基础信息 + API Key。"""
+    """账户资料页（仿 MailNest /account）：基础信息 + API Key。
+
+    管理员看全局 Key；客户看自己名下的 Key（计费 key）。
+    """
     keys = settings_service.get_api_keys(db)
+    uid = _current_user_id(request, db)
+    user = billing_service.get_user(db, uid) if uid else None
+    user_keys = settings_service.list_user_api_keys(db, uid) if uid else []
     return _render(
         request, "account.html", active="account",
         api_key=keys[0] if keys else "",
         api_keys=keys,
+        user=user,
+        user_keys=user_keys,
+        snapshot=billing_service.balance_snapshot(db, uid or 0),
     )
 
 

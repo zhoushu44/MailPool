@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+{% block title %}用户余额{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">用户余额</div>
+        <div class="page-sub">每个 API Key 归属一个用户，扣费与充值都记在同一个账上</div>
+    </div>
+    <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+</div>
+
+<div class="card">
+    <div class="card-title">新建用户</div>
+    <div class="mn-filter-row">
+        <div><label>用户名</label><input type="text" id="mn-new-username" placeholder="user001"></div>
+        <div><label>密码</label><input type="text" id="mn-new-password" placeholder="可选"></div>
+        <div><label>邮箱</label><input type="text" id="mn-new-email" placeholder="可选"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="createUser()">创建</button></div>
+    </div>
+    <div class="mn-detail-hint" style="margin:10px 0 0">创建后到下面「API Key」给该用户签发 Key，客户端用这个 Key 调用即可计费。</div>
+</div>
+
+<div class="card">
+    <div class="card-title">API Key</div>
+    <div class="mn-filter-row">
+        <div><label>用户 ID</label><input type="text" id="mn-key-user" placeholder="1" style="width:110px"></div>
+        <div><label>备注</label><input type="text" id="mn-key-name" placeholder="如：客户A的客户端" style="width:200px"></div>
+        <div style="display:flex;align-items:flex-end"><button class="btn" onclick="issueKey()">签发 Key</button></div>
+    </div>
+    <div id="mn-key-output" style="margin-top:12px"></div>
+    <div id="mn-key-list" style="margin-top:12px"></div>
+</div>
+
+<div class="mn-table-card">
+    {% if rows %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th style="width:48px">ID</th>
+                <th>用户名</th>
+                <th>总余额</th>
+                <th>冻结</th>
+                <th>可用</th>
+                <th>累计充值</th>
+                <th>累计消耗</th>
+                <th>状态</th>
+                <th>操作</th>
+            </tr></thead>
+            <tbody>
+            {% for r in rows %}
+            <tr>
+                <td class="mono">{{ r.id }}</td>
+                <td>{{ r.username }}</td>
+                <td class="mono">{{ '%.3f'|format(r.balance / 1000) }}</td>
+                <td class="mono">{{ '%.3f'|format(r.frozen_balance / 1000) }}</td>
+                <td class="mono">{{ '%.3f'|format((r.balance - r.frozen_balance) / 1000) }}</td>
+                <td class="mono">{{ '%.3f'|format(r.total_recharged / 1000) }}</td>
+                <td class="mono">{{ '%.3f'|format(r.total_charged / 1000) }}</td>
+                <td>{% if r.status == 1 %}<span class="badge badge-available">启用</span>{% else %}<span class="badge badge-dead">禁用</span>{% endif %}</td>
+                <td>
+                    <div class="btn-row">
+                        <button class="btn btn-sm btn-ghost" onclick="adjust({{ r.id }})">调整余额</button>
+                        <button class="btn btn-sm btn-ghost" onclick="viewLogs({{ r.id }})">流水</button>
+                    </div>
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="mn-pager">
+        <span>每页 {{ page_size }} 条 · 共 {{ total }} 条</span>
+        <div class="btn-row">
+            {% if page > 1 %}<a class="btn btn-sm btn-ghost" href="/billing/users?page={{ page - 1 }}&page_size={{ page_size }}">上一页</a>{% endif %}
+            <span class="mn-pager-info">第 {{ page }} 页 / 共 {{ total_pages }} 页</span>
+            {% if page < total_pages %}<a class="btn btn-sm btn-ghost" href="/billing/users?page={{ page + 1 }}&page_size={{ page_size }}">下一页</a>{% endif %}
+        </div>
+    </div>
+    {% else %}
+    <div class="empty">暂无用户</div>
+    {% endif %}
+</div>
+
+<div class="card" id="mn-user-detail" style="display:none">
+    <div class="card-title">用户流水</div>
+    <div id="mn-user-logs"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function createUser() {
+    const username = (document.getElementById('mn-new-username').value || '').trim();
+    if (!username) { toast('请输入用户名', 'error'); return; }
+    try {
+        await api('/api/admin/billing/users', {
+            method: 'POST',
+            body: JSON.stringify({
+                username: username,
+                password: document.getElementById('mn-new-password').value || '',
+                email: document.getElementById('mn-new-email').value || '',
+            }),
+        });
+        toast('用户已创建', 'success');
+        location.reload();
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function adjust(userId) {
+    const amount = prompt('输入调整金额（正数充值，负数扣款，单位：元）', '10.00');
+    if (amount === null) return;
+    try {
+        const res = await api('/api/admin/billing/users/' + userId + '/balance', {
+            method: 'POST',
+            body: JSON.stringify({ amount: amount, remark: '后台调整' }),
+        });
+        toast('已调整，余额 ' + res.data.balance + ' 元', 'success');
+        location.reload();
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function viewLogs(userId) {
+    try {
+        const res = await api('/api/admin/billing/users/' + userId + '/logs?page_size=50');
+        const d = res.data;
+        let html = '<div class="table-wrap"><table><thead><tr>'
+            + '<th>类型</th><th>金额</th><th>变动前余额</th><th>变动后余额</th>'
+            + '<th>变动前冻结</th><th>变动后冻结</th><th>备注</th><th>时间</th>'
+            + '</tr></thead><tbody>';
+        for (const l of d.logs) {
+            html += '<tr><td>' + escHtml(l.log_type) + '</td>'
+                + '<td class="mono">' + escHtml(l.amount) + '</td>'
+                + '<td class="mono">' + escHtml(l.balance_before) + '</td>'
+                + '<td class="mono">' + escHtml(l.balance_after) + '</td>'
+                + '<td class="mono">' + escHtml(l.frozen_before) + '</td>'
+                + '<td class="mono">' + escHtml(l.frozen_after) + '</td>'
+                + '<td>' + escHtml(l.remark) + '</td>'
+                + '<td class="mono">' + escHtml(l.created_at) + '</td></tr>';
+        }
+        html += '</tbody></table></div>';
+        if (!d.logs.length) html = '<div class="empty">暂无流水</div>';
+        document.getElementById('mn-user-logs').innerHTML = html;
+        document.getElementById('mn-user-detail').style.display = '';
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function issueKey() {
+    const userId = parseInt(document.getElementById('mn-key-user').value || '0', 10);
+    if (!userId) { toast('请输入用户 ID', 'error'); return; }
+    try {
+        const res = await api('/api/admin/billing/api-keys', {
+            method: 'POST',
+            body: JSON.stringify({ user_id: userId, name: document.getElementById('mn-key-name').value || '' }),
+        });
+        const key = res.data.key;
+        document.getElementById('mn-key-output').innerHTML =
+            '<div class="card-title">新 Key（只显示这一次）</div>'
+            + '<code class="mono" style="word-break:break-all">' + escHtml(key) + '</code>'
+            + '<div class="btn-row" style="margin-top:8px"><button class="btn btn-sm btn-ghost" onclick="copyKey()">复制</button></div>';
+        document.getElementById('mn-key-list').innerHTML = '';
+        loadKeys();
+        toast('已签发', 'success');
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+function copyKey() {
+    const el = document.querySelector('#mn-key-output code');
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent)
+        .then(() => toast('已复制', 'success'))
+        .catch(() => toast('复制失败', 'error'));
+}
+
+async function loadKeys() {
+    try {
+        const res = await api('/api/admin/billing/api-keys?page_size=100');
+        const d = res.data;
+        let html = '<div class="card-title">已签发的 Key</div><div class="table-wrap"><table>'
+            + '<thead><tr><th>ID</th><th>用户</th><th>Key</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+        for (const k of d.keys) {
+            html += '<tr><td class="mono">' + k.id + '</td>'
+                + '<td class="mono">' + (k.user_id || '—') + '</td>'
+                + '<td class="mono" style="word-break:break-all">' + escHtml(k.key) + '</td>'
+                + '<td>' + escHtml(k.name || '—') + '</td>'
+                + '<td>' + (k.enabled ? '启用' : '禁用') + '</td>'
+                + '<td><button class="btn btn-sm btn-ghost" onclick="revokeKey(' + k.id + ')">吊销</button></td></tr>';
+        }
+        html += '</tbody></table></div>';
+        if (!d.keys.length) html = '<div class="empty">暂无 Key</div>';
+        document.getElementById('mn-key-list').innerHTML = html;
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+async function revokeKey(keyId) {
+    if (!confirm('确认吊销这个 Key？吊销后用该 Key 的客户端会立即 401。')) return;
+    try {
+        await api('/api/admin/billing/api-keys/' + keyId, { method: 'DELETE' });
+        toast('已吊销', 'success');
+        loadKeys();
+    } catch (err) { toast(err.message, 'error'); }
+}
+
+loadKeys();
+</script>
+{% endblock %}

@@ -70,6 +70,84 @@ def remove_api_key(db: Session, key: str) -> list[str]:
     return keys
 
 
+# ── 绑定用户的 API Key（计费版）───────────────────────────────
+
+
+def create_user_api_key(db: Session, user_id: int, name: str = "") -> str:
+    """给用户签发一个绑定身份的 API Key。
+
+    绑了 user_id 的 key 才能计费；老的裸 key（settings.api_keys）视为匿名。
+    """
+    from ..models import ApiKey
+
+    key = f"ak_{secrets.token_hex(16)}"
+    db.add(ApiKey(user_id=user_id, key=key, name=name[:64], enabled=1))
+    db.commit()
+    return key
+
+
+def list_user_api_keys(db: Session, user_id: int | None = None) -> list[Any]:
+    from sqlalchemy import select
+
+    from ..models import ApiKey
+
+    stmt = select(ApiKey)
+    if user_id is not None:
+        stmt = stmt.where(ApiKey.user_id == user_id)
+    return list(db.scalars(stmt.order_by(ApiKey.id.asc())))
+
+
+def delete_user_api_key(db: Session, key_id: int) -> bool:
+    from ..models import ApiKey
+
+    row = db.get(ApiKey, key_id)
+    if row is None:
+        return False
+    db.delete(row)
+    db.commit()
+    return True
+
+
+# ────────────────────────────────────────────────────────────────
+#  计费 / 支付配置
+# ────────────────────────────────────────────────────────────────
+
+# 支付通道配置（抄 new-api 的 Option 表思路：一切可调项存 settings 键值表）
+BILLING_DEFAULTS: dict[str, str] = {
+    # 计费总开关：关闭时保持旧的"免费发放"行为
+    "enabled": "false",
+    # 默认单价（元），项目 config_json 里的 price 优先
+    "default_price": "0.018",
+    # 最小充值金额（元）
+    "min_topup": "1.00",
+    # 单次最大充值金额（元）
+    "max_topup": "1000.00",
+    # 临时邮箱冻结超时（秒），超时自动释放不扣费
+    "hold_timeout": "1200",
+    # 充值赠送比例（百分比，0 = 不赠送）
+    "award_percent": "0",
+    # 易支付网关地址（空 = 未配置，充值页面只显示充值卡）
+    "epay_url": "",
+    "epay_pid": "",
+    "epay_key": "",
+    # 本站对外地址，用于拼支付回调地址
+    "site_url": "",
+    # 充值卡默认面额（元），批量生成时用
+    "card_default_amount": "10.00",
+}
+
+
+def get_billing_config(db: Session) -> dict[str, str]:
+    return {k: _get_value(db, f"billing.{k}", v) for k, v in BILLING_DEFAULTS.items()}
+
+
+def save_billing_config(db: Session, config: dict[str, Any]) -> dict[str, str]:
+    for key in BILLING_DEFAULTS:
+        if key in config:
+            _set_value(db, f"billing.{key}", str(config[key]))
+    return get_billing_config(db)
+
+
 # ────────────────────────────────────────────────────────────────
 #  心跳保活配置
 # ────────────────────────────────────────────────────────────────

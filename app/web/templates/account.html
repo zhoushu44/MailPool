@@ -8,33 +8,47 @@
     </div>
 </div>
 
+{% if user %}
 <div class="card">
+    <div class="card-title">我的账户</div>
     <div class="mn-account-grid">
-        <div class="mn-account-item">
-            <span class="mn-account-label">用户ID：</span>
-            <span class="mono">admin-local</span>
-        </div>
-        <div class="mn-account-item">
-            <span class="mn-account-label">用户名：</span>
-            <span>admin</span>
-        </div>
-        <div class="mn-account-item">
-            <span class="mn-account-label">邀请码：</span>
-            <span>—</span>
-        </div>
-        <div class="mn-account-item">
-            <span class="mn-account-label">邀请人ID：</span>
-            <span>—</span>
-        </div>
-        <div class="mn-account-item">
-            <span class="mn-account-label">注册时间：</span>
-            <span>—</span>
-        </div>
+        <div class="mn-account-item"><span class="mn-account-label">用户ID：</span><span class="mono">{{ user.id }}</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">用户名：</span><span>{{ user.username }}</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">总余额：</span><span class="mono">{{ snapshot.balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">可用余额：</span><span class="mono">{{ snapshot.available_balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">冻结余额：</span><span class="mono">{{ snapshot.frozen_balance }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">累计充值：</span><span class="mono">{{ '%.3f'|format(user.total_recharged / 1000) }} 元</span></div>
+        <div class="mn-account-item"><span class="mn-account-label">累计消耗：</span><span class="mono">{{ '%.3f'|format(user.total_charged / 1000) }} 元</span></div>
     </div>
 </div>
 
 <div class="card">
-    <div class="card-title">API Key</div>
+    <div class="card-title">我的 API Key</div>
+    {% if user_keys %}
+    <div class="table-wrap">
+        <table>
+            <thead><tr><th>Key</th><th>备注</th><th>状态</th><th>创建时间</th></tr></thead>
+            <tbody>
+            {% for k in user_keys %}
+            <tr>
+                <td class="mono">{{ k.key }}</td>
+                <td>{{ k.name or '—' }}</td>
+                <td>{% if k.enabled %}<span class="badge badge-available">启用</span>{% else %}<span class="badge badge-dead">禁用</span>{% endif %}</td>
+                <td class="mono">{{ k.created_at.strftime('%Y-%m-%d %H:%M:%S') if k.created_at else '—' }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <div class="mn-detail-hint" style="margin:10px 0 0">调用对外接口时带上这个 Key：<code class="mono">Authorization: Bearer &lt;key&gt;</code>。扣费记在你这个账户上。</div>
+    {% else %}
+    <div class="empty">暂无 API Key，请联系管理员签发</div>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-title">API Key（全局）</div>
     <div class="mn-api-row">
         <code class="mn-api-key mono">{{ api_key or '未生成，点击「重置」创建' }}</code>
         <div class="btn-row">

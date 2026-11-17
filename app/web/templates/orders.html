@@ -4,7 +4,13 @@
 <div class="mn-list-head">
     <div>
         <div class="page-title">下单流水</div>
-        <div class="page-sub">按邮箱汇总的取号记录（未接入计费，取号完全免费）</div>
+        <div class="page-sub">
+            {% if billing_on %}
+            按邮箱聚合的取号订单（含单价与计费状态）
+            {% else %}
+            按邮箱汇总的取号记录（未接入计费，取号完全免费）
+            {% endif %}
+        </div>
     </div>
     <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
 </div>
@@ -30,11 +36,12 @@
         <table>
             <thead><tr>
                 <th style="width:48px">序号</th>
+                {% if is_admin %}<th>用户</th>{% endif %}
                 <th>邮箱</th>
                 <th>邮箱类型</th>
                 <th>项目名称</th>
                 <th>项目编码</th>
-                <th>邮箱状态</th>
+                {% if billing_on %}<th>单价</th><th>计费状态</th>{% else %}<th>邮箱状态</th>{% endif %}
                 <th>获取时间</th>
                 <th>最新收件</th>
             </tr></thead>
@@ -42,10 +49,24 @@
             {% for r in rows %}
             <tr>
                 <td class="mono">{{ (page - 1) * page_size + loop.index }}</td>
+                {% if is_admin %}
+                <td>{{ r.username or '—' }} <span class="mono" style="color:var(--muted,#94a3b8)">#{{ r.user_id }}</span></td>
+                {% endif %}
                 <td><a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}&project_code={{ r.project_code|urlencode }}">{{ r.email }}</a></td>
                 <td><span class="badge badge-temp">临时</span></td>
                 <td>{{ r.project_name }}</td>
                 <td class="mono">{{ r.project_code }}</td>
+                {% if billing_on %}
+                <td class="mono">￥{{ r.price }}</td>
+                <td>
+                    {% if r.billing_status == 'charged' %}<span class="badge badge-dead">已扣费</span>
+                    {% elif r.billing_status == 'free' %}<span class="badge badge-temp">未扣费</span>
+                    {% else %}<span class="badge badge-using">待确认</span>{% endif %}
+                    {% if r.charged_amount and r.charged_amount != '0.000' %}
+                    <span class="mn-count">￥{{ r.charged_amount }}</span>
+                    {% endif %}
+                </td>
+                {% else %}
                 <td>
                     {% if r.pooled %}
                         {% if r.account_status == 'using' %}<span class="badge badge-using">占用中</span>
@@ -55,7 +76,8 @@
                         <span class="badge badge-temp">临时</span>
                     {% endif %}
                 </td>
-                <td class="mono" style="white-space:nowrap">{{ r.first_used_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                {% endif %}
+                <td class="mono" style="white-space:nowrap">{{ r.first_used_at.strftime('%Y-%m-%d %H:%M:%S') if r.first_used_at else '—' }}</td>
                 <td>
                     {% if r.code %}<span class="badge badge-code">{{ r.code }}</span>
                     {% elif r.last_received_at %}<span class="mono">{{ r.last_received_at.strftime('%m-%d %H:%M') }}</span>

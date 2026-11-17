@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}用户登录{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">用户登录</div>
+        <div class="page-sub">登录后可查看自己的余额、充值、费用明细</div>
+    </div>
+</div>
+
+<div class="card" style="max-width:420px">
+    <form method="post" action="/user/login">
+        <div class="mn-filter-row">
+            <div style="flex:1"><label>用户名</label><input type="text" name="username" value="{{ username or '' }}" required></div>
+        </div>
+        <div class="mn-filter-row" style="margin-top:10px">
+            <div style="flex:1"><label>密码</label><input type="password" name="password" required></div>
+        </div>
+        {% if error %}
+        <div class="mn-detail-hint" style="color:var(--danger, #dc2626);margin-top:10px">{{ error }}</div>
+        {% endif %}
+        <div style="margin-top:14px"><button type="submit" class="btn">登录</button></div>
+    </form>
+</div>
+{% endblock %}

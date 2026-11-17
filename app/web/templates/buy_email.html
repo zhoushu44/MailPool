@@ -14,7 +14,7 @@
 </div>
 
 <div id="tab-temp">
-    <div class="mn-mall-note">临时邮箱仅在有效期内接收对应项目的邮件。系统会根据一定规则对邮件进行过滤：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若在临时邮箱中没有你需要的项目，可以点击「联系我们」申请项目。未接入计费，购买即取号，完全免费。</div>
+    <div class="mn-mall-note">临时邮箱仅在有效期内接收对应项目的邮件。系统会根据一定规则对邮件进行过滤：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若在临时邮箱中没有你需要的项目，可以点击「联系我们」申请项目。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}</div>
 
     {% if projects %}
     <div class="mn-mall-list">
@@ -41,8 +41,13 @@
             </div>
             <div class="mn-mall-foot">
                 <div class="mn-mall-price">
+                    {% if billing_on %}
+                    <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
+                    <div class="mn-mall-price-origin">{% if p.card_original_price %}￥{{ p.card_original_price }}{% else %}—{% endif %}</div>
+                    {% else %}
                     <div class="mn-mall-price-now">免费</div>
                     <div class="mn-mall-price-origin">¥0.0000</div>
+                    {% endif %}
                 </div>
                 <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
             </div>
@@ -55,7 +60,7 @@
 </div>
 
 <div id="tab-exclusive" style="display:none">
-    <div class="mn-mall-note">独占邮箱可以接收一切邮件（未接入计费，购买即取号，完全免费）。选择项目后取号，邮箱将归您使用。</div>
+    <div class="mn-mall-note">独占邮箱可以接收一切邮件。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}选择项目后取号，邮箱将归您使用。</div>
     {% if projects %}
     <div class="mn-mall-list">
         {% for p in projects %}
@@ -81,8 +86,13 @@
             </div>
             <div class="mn-mall-foot">
                 <div class="mn-mall-price">
+                    {% if billing_on %}
+                    <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
+                    <div class="mn-mall-price-origin">{% if p.card_original_price %}￥{{ p.card_original_price }}{% else %}—{% endif %}</div>
+                    {% else %}
                     <div class="mn-mall-price-now">免费</div>
                     <div class="mn-mall-price-origin">¥0.0000</div>
+                    {% endif %}
                 </div>
                 <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
             </div>

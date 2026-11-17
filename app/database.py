@@ -64,6 +64,19 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS ix_email_usages_first_used_at "
             "ON email_usages (first_used_at)"
         )
+        # 计费相关索引（幂等迁移；老库没有这些表时由 create_all 建好）
+        for sql in (
+            "CREATE INDEX IF NOT EXISTS ix_email_orders_user_billing "
+            "ON email_orders (user_id, billing_status)",
+            "CREATE INDEX IF NOT EXISTS ix_balance_logs_user_created "
+            "ON balance_logs (user_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_recharge_orders_user_status "
+            "ON recharge_orders (user_id, status)",
+        ):
+            try:
+                conn.exec_driver_sql(sql)
+            except Exception:
+                pass  # 表还没建（首次启动前）→ 忽略
         # 逐列幂等迁移；记录新增列，只有首次拆分时才从旧 status 回填。
         account_columns = {
             row[1] for row in conn.exec_driver_sql("PRAGMA table_info(email_accounts)")
