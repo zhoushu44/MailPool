@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
+from ..models import ApiKey, BalanceLog, EmailOrder, RedeemCard, RechargeOrder
 from ..services import billing_service, payment_service, settings_service
 from .auth import require_admin
 
@@ -82,6 +83,42 @@ def create_user(body: CreateUserBody, db: Session = Depends(get_db)) -> dict[str
 class AdjustBalanceBody(BaseModel):
     amount: float
     remark: str = ""
+
+
+@router.delete("/users/{user_id}")
+def delete_user(
+    user_id: int,
+    force: bool = False,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """删除用户（连带他的 Key、流水、订单、充值卡使用记录）。
+
+    余额非 0 时默认拒绝 —— 免得手滑把还在充值的客户删了。
+    传 force=true 强制删（余额会被清零，流水一并抹掉）。
+    """
+    user = billing_service.get_user(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    balance = int(user.balance or 0)
+    frozen = int(user.frozen_balance or 0)
+    if (balance or frozen) and not force:
+        raise HTTPException(
+            status_code=400,
+            detail=f"用户还有余额 {billing_service.fmt_milli(balance)} 元"
+                   f"（冻结 {billing_service.fmt_milli(frozen)} 元），确认清零请传 force=true",
+        )
+
+    db.query(ApiKey).filter(ApiKey.user_id == user_id).delete()
+    db.query(BalanceLog).filter(BalanceLog.user_id == user_id).delete()
+    db.query(RechargeOrder).filter(RechargeOrder.user_id == user_id).delete()
+    db.query(EmailOrder).filter(EmailOrder.user_id == user_id).delete()
+    db.query(RedeemCard).filter(RedeemCard.used_by == user_id).update(
+        {RedeemCard.used_by: 0, RedeemCard.status: 0, RedeemCard.used_at: None}
+    )
+    db.delete(user)
+    db.commit()
+    return {"code": 0, "data": {"deleted": user_id}}
 
 
 @router.post("/users/{user_id}/balance")

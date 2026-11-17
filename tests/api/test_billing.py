@@ -24,13 +24,16 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# 必须在 import app.* 之前设好
-_TMP_DATA = tempfile.mkdtemp(prefix="mailpool_billing_test_")
-os.environ["MAILPOOL_DATA"] = _TMP_DATA
-os.environ["MAILPOOL_ADMIN_PASSWORD"] = "adminpass"
-os.environ["MAILPOOL_SESSION_SECRET"] = "test-secret-test-secret-test-secret-1234"
+# MAILPOOL_DATA 统一在 tests/conftest.py 里设（必须在 import app.* 之前），
+# 这里不再重复设 —— 两个模块各设各的会互相覆盖，保险丝会炸。
+os.environ.setdefault("MAILPOOL_ADMIN_PASSWORD", "adminpass")
+os.environ.setdefault("MAILPOOL_SESSION_SECRET", "test-secret-test-secret-test-secret-1234")
 
 ADMIN = {"X-Admin-Password": "adminpass"}
+
+# 仓库根下的生产库绝对不能被碰到
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROD_DB = os.path.join(REPO_ROOT, "data", "mailpool.db").replace("\\", "/").lower()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -43,13 +46,15 @@ def _assert_isolated():
     from app.config import DB_PATH
     from app.database import engine
 
-    expected = os.path.join(_TMP_DATA, "mailpool.db").replace("\\", "/").lower()
-    assert str(DB_PATH).replace("\\", "/").lower() == expected, (
-        f"MAILPOOL_DATA 没生效，DB_PATH={DB_PATH}，拒绝跑测试（会污染生产库）"
-    )
-    assert str(engine.url).replace("\\", "/").lower().endswith(expected), (
-        f"engine 指向了 {engine.url}，拒绝跑测试"
-    )
+    db = str(DB_PATH).replace("\\", "/").lower()
+    url = str(engine.url).replace("\\", "/").lower()
+
+    # 必须落在系统临时目录里
+    tmp = tempfile.gettempdir().replace("\\", "/").lower()
+    assert db.startswith(tmp), f"DB_PATH={DB_PATH} 不在临时目录，拒绝跑测试"
+    # 而且不能是生产库
+    assert db != PROD_DB, f"DB_PATH 指向生产库 {DB_PATH}，拒绝跑测试"
+    assert url.endswith(db), f"engine 指向了 {engine.url}，与 DB_PATH 不一致"
 
 
 @pytest.fixture(scope="session")
