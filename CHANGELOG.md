@@ -23,13 +23,17 @@
 - `D0001` 由「预留位」改为真实的**余额不足**（不发货），新增 `D0007` 充值/支付流程错误
 - 计费**默认关闭**（`billing.enabled = false`），老部署行为完全不变
 - 余额六栏（balance/available/frozen/scan/card/award）全部从 `balance_logs` 流水推导，流水是唯一事实来源
+- `DELETE /api/admin/billing/users/{id}?force=true` 删用户（连带 Key/流水/订单；有余额时默认 400，要清零须显式 force）
 - 设计文档：`docs/billing.md`；参考源码：`docs/reference/`
+- 生产部署：CI 构建镜像 → 服务器 `upgrade.sh` 拉取重建（备份 + 探活 + 失败回滚），详见 `docs/deployment-target-<SERVER_HOST>.md`
 
 **测试**
 
 - `tests/api/test_billing.py` —— 16 个计费端到端用例（临时库 + 保险丝，绝不碰生产库）
 - `tests/api/test_billing_ui.py` —— 4 个 Playwright 真实页面交互用例（自起隔离服务）
-- 全量 `python -m pytest tests/ -q` → **39 passed**
+- `tests/api/test_billing_admin_extra.py` —— 6 个管理 API 补充用例（删用户/重名/零金额/充值边界）
+- 测试库隔离统一到 `tests/conftest.py`（之前各模块各设各的 `MAILPOOL_DATA` 会互相覆盖，保险丝直接炸）
+- 全量 `python -m pytest tests/ -q` → **45 passed**
 
 ### 修复
 
