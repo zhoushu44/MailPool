@@ -126,6 +126,21 @@ def _migrate_usage_constraints(conn) -> None:
         conn.exec_driver_sql(
             f"CREATE INDEX IF NOT EXISTS ix_{table}_project_code ON {table}(project_code)"
         )
+        if table == "email_usages":
+            # 老语义把「被用过」的号全部退役了；新语义下绑定只挡对应项目，
+            # 健康（非 dead）的 retired 号全部回池，其他项目立即可取。
+            res = conn.exec_driver_sql(
+                "UPDATE email_accounts SET pool_status='available', claimed_at=NULL "
+                "WHERE pool_status='retired' AND health_status IN ('healthy', 'unknown')"
+            )
+            # 同步旧 status 字段（available 时跟随 health）
+            conn.exec_driver_sql(
+                "UPDATE email_accounts SET status = "
+                "CASE WHEN health_status IN ('healthy','unhealthy','dead') "
+                "THEN health_status ELSE 'available' END "
+                "WHERE pool_status='available'"
+            )
+            print(f"[migrate] 按项目一次性：回收 retired 号 {res.rowcount} 个回池")
 
 
 def init_db() -> None:
