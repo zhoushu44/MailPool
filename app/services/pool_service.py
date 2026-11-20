@@ -761,6 +761,32 @@ def get_account_credentials(db: Session, email: str) -> dict[str, Any] | None:
     return {"email": acc.email, "account_id": acc.id, "provider": acc.provider, **cred}
 
 
+def update_refresh_token(email: str, new_refresh_token: str) -> None:
+    """把 provider 刷新时轮换出的新 refresh_token 落库（独立短事务）。
+
+    收码线程与调度任务共享库里的 rt；微软 IMAP scope 刷新会轮换 rt，
+    不落库的话其他组件拿旧 rt 必然 invalid_grant。
+    """
+    import json as _json
+
+    from ..database import SessionLocal
+
+    with SessionLocal() as s:
+        acc = s.scalar(
+            select(EmailAccount).where(EmailAccount.email == (email or "").lower())
+        )
+        if acc is None:
+            return
+        try:
+            cred = _json.loads(acc.account_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            cred = {}
+        if cred.get("refresh_token") != new_refresh_token:
+            cred["refresh_token"] = new_refresh_token
+            acc.account_json = _json.dumps(cred, ensure_ascii=False)
+            s.commit()
+
+
 def snapshot_mail_baseline(db: Session, email: str, project_code: str = "") -> dict[str, Any]:
     """取号瞬间抓一次收件箱快照，作为"旧信基线"。
 
@@ -958,12 +984,18 @@ def check_accounts_health(
             cred = json.loads(acc.account_json or "{}")
             if acc.proxy:
                 cred["proxy"] = acc.proxy
+            cred["email"] = acc.email  # provider 内 rt 轮换回写需要
+            old_rt = cred.get("refresh_token")
             if provider == "outlook":
                 from ..providers.outlook import verify_account
                 status, detail = verify_account(cred)
                 ok = (status == "healthy")
             else:
                 ok, detail = True, "无连通性检查（临时源）"
+            if cred.get("refresh_token") != old_rt:
+                # verify 期间微软轮换了 rt（IMAP scope 降级分支），落库
+                acc.account_json = json.dumps(cred, ensure_ascii=False)
+                logger.info(f"[health-scan] {acc.email} refresh_token 已轮换落库")
 
             final_status = _apply_check_result(acc, ok, detail, db=db, auto_delete_risk=False)
             
@@ -1157,6 +1189,7 @@ def heartbeat(
             cred = json.loads(acc.account_json or "{}")
             if acc.proxy:
                 cred["proxy"] = acc.proxy
+            cred["email"] = acc.email  # provider 内 rt 轮换回写需要
             from ..providers.outlook import silent_keepalive
             ok, msg = silent_keepalive(cred, interactive=interactive)
 
@@ -1438,10 +1471,12 @@ def _run_batch_refresh(task_id: str, provider: str) -> None:
                     _mark_batch_result(task_id, acc.email, "skipped", "缺少 refresh_token，跳过")
                     continue
 
-                data = _request_access_token(rt, cid, GRAPH_SCOPE)
-                new_rt = data.get("refresh_token")
-                if new_rt and new_rt != rt:
-                    cred["refresh_token"] = new_rt
+                # 互斥刷新（防止与收码/健康扫描并发轮换同一 rt）；
+                # 轮换的新 rt 由 _refresh_token_for 写 cred + hook 落库
+                from ..providers.outlook import _refresh_token_for
+                cred["email"] = acc.email
+                _refresh_token_for(cred, GRAPH_SCOPE)
+                if cred.get("refresh_token") != rt:
                     acc.account_json = json.dumps(cred, ensure_ascii=False)
                     logger.info(f"[batch-refresh] {acc.email} refresh_token 已轮换更新")
 

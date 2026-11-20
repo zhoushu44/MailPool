@@ -25,6 +25,25 @@ from . import settings_service
 
 logger = logging.getLogger(__name__)
 
+# ── refresh_token 轮换回写钩子 ────────────────────────────────
+# outlook provider 刷新 token 时若微软轮换了 rt，通过此钩子落库。
+# 不落库的话：IMAP scope 刷新轮换 rt → 库里 rt 作废 → 全部组件
+# invalid_grant → 降级密码 IMAP → 微软禁用 basic auth → 收码超时。
+def _persist_rotated_rt(email: str, new_refresh_token: str) -> None:
+    pool_service.update_refresh_token(email, new_refresh_token)
+
+
+def _install_rt_save_hook() -> None:
+    try:
+        from ..providers import outlook as _outlook
+
+        _outlook.set_rt_save_hook(_persist_rotated_rt)
+    except Exception as exc:  # provider 缺 hook 时静默（兼容旧版）
+        logger.warning(f"refresh_token 回写钩子注入失败: {exc}")
+
+
+_install_rt_save_hook()
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)

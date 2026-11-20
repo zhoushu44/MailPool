@@ -14,12 +14,13 @@ import imaplib
 import json
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .base import ConfigField, EmailProvider, ProviderError, register
 
@@ -50,6 +51,7 @@ _FATAL_IMAP_PATTERNS = (
     "imap xoauth2",
     "invalid_grant",
     "invalid_client",
+    "basic authentication is disabled",
 )
 
 
@@ -225,7 +227,7 @@ def verify_account(cred: dict[str, Any]) -> tuple[str, str]:
 
     # 尝试 Graph scope
     try:
-        data = _request_access_token(rt, cid, GRAPH_SCOPE, proxy=proxy)
+        data = _refresh_token_for(cred, GRAPH_SCOPE)
         access_token = data["access_token"]
 
         # Graph API 验证：拉取 1 封邮件
@@ -244,7 +246,7 @@ def verify_account(cred: dict[str, Any]) -> tuple[str, str]:
                 # 降级试 IMAP scope
                 logger.info(f"[verify] Graph scope invalid_grant，降级试 IMAP scope")
                 try:
-                    data = _request_access_token(rt, cid, IMAP_SCOPE, proxy=proxy)
+                    data = _refresh_token_for(cred, IMAP_SCOPE)
                     logger.info(f"[verify] ✓ IMAP scope 验证通过（Graph scope 缺失）")
                     return "healthy", "IMAP scope 验证通过（Graph scope 缺失）"
                 except Exception as e2:
@@ -263,7 +265,7 @@ def verify_account(cred: dict[str, Any]) -> tuple[str, str]:
         # 降级试 IMAP scope
         logger.info(f"[verify] Graph scope 所有端点失败，降级试 IMAP scope")
         try:
-            data = _request_access_token(rt, cid, IMAP_SCOPE)
+            data = _refresh_token_for(cred, IMAP_SCOPE)
             logger.info(f"[verify] ✓ IMAP scope 验证通过")
             return "healthy", "IMAP scope 验证通过"
         except Exception as e2:
@@ -292,12 +294,11 @@ def silent_keepalive(cred: dict[str, Any], interactive: bool = False) -> tuple[b
         return False, "缺少 client_id 或 refresh_token"
 
     try:
-        data = _request_access_token(rt, cid, GRAPH_SCOPE, proxy=proxy)
+        data = _refresh_token_for(cred, GRAPH_SCOPE)
         access_token = data["access_token"]
 
-        # 更新 refresh_token（微软可能轮换）
+        # 轮换回写由 _refresh_token_for 统一处理（内存 + hook 落库）
         if data.get("refresh_token") and data["refresh_token"] != rt:
-            cred["refresh_token"] = data["refresh_token"]
             logger.info(f"[keepalive] refresh_token 已轮换（微软返回新 token）")
         else:
             logger.info(f"[keepalive] token 刷新成功，refresh_token 未变")
@@ -381,6 +382,51 @@ def _request_access_token(refresh_token: str, client_id: str, scope: str, proxy:
     raise ProviderError(f"token 获取失败 (scope={scope}): {last_error}", fatal=True)
 
 
+# ── refresh_token 轮换的并发治理 ─────────────────────────────
+# 微软 consumer MSA 的 refresh_token 是轮换的：用 IMAP scope 刷新会
+# 返回「新 refresh_token」，旧 token 随即作废。历史上收码线程把新
+# rt 只留在内存里，库里的 rt 立刻变尸体，于是下一次任何组件（批量
+# 刷新 / 健康扫描 / 下一次收码）全部 invalid_grant，再降级密码 IMAP
+# 撞「Basic authentication is disabled」——收码超时的元凶。
+# 现在统一走 _refresh_token_for：同邮箱互斥 + 轮换结果回写数据库。
+
+_rt_save_hook: Optional[Callable[[str, str], None]] = None
+_refresh_locks: dict[str, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def set_rt_save_hook(fn: Optional[Callable[[str, str], None]]) -> None:
+    """注入 refresh_token 轮换回写回调 fn(email, new_refresh_token)。"""
+    global _rt_save_hook
+    _rt_save_hook = fn
+
+
+def _refresh_lock(email: str, cred: dict[str, Any]) -> threading.Lock:
+    key = email or (cred.get("refresh_token") or "")[:24] or "?"
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(key, threading.Lock())
+
+
+def _refresh_token_for(cred: dict[str, Any], scope: str, email: str = "") -> dict:
+    """互斥刷新 access_token；轮换出的新 refresh_token 同步内存并回写库。"""
+    email = email or str(cred.get("email") or "")
+    with _refresh_lock(email, cred):
+        rt = cred.get("refresh_token") or ""  # 锁内重读：同号可能刚被轮换
+        data = _request_access_token(rt, cred.get("client_id") or "", scope,
+                                     proxy=cred.get("proxy") or "")
+        new_rt = data.get("refresh_token")
+        if new_rt and new_rt != rt:
+            cred["refresh_token"] = new_rt  # provider 实例内存同步
+            hook = _rt_save_hook
+            if hook is not None:
+                try:
+                    hook(email, new_rt)
+                    logger.info(f"[token] {email or '(no-email)'} 轮换 rt 已回写库")
+                except Exception as e:
+                    logger.warning(f"[token] 轮换 rt 回写失败 {email}: {e}")
+        return data
+
+
 def _is_hex_color_context(haystack: str, idx: int) -> bool:
     if idx > 0 and haystack[idx - 1] == "#":
         return True
@@ -422,7 +468,7 @@ def _graph_list_messages(access_token: str, folder: str, timeout: float = 15) ->
 def graph_list_messages(cred: dict[str, Any], folder: str = "inbox", top: int = 20) -> list[dict[str, Any]]:
     folder = folder if folder in GRAPH_FOLDERS else "inbox"
     proxy = cred.get("proxy") or ""
-    data = _request_access_token(cred.get("refresh_token", ""), cred.get("client_id", ""), GRAPH_SCOPE, proxy=proxy)
+    data = _refresh_token_for(cred, GRAPH_SCOPE)
     params = urllib.parse.urlencode({"$top": str(max(1, min(top, 100))), "$orderby": "receivedDateTime DESC", "$select": "id,subject,bodyPreview,receivedDateTime,from,toRecipients,isRead"})
     req = urllib.request.Request(f"{GRAPH_BASE}/me/mailFolders/{folder}/messages?{params}", headers={"Authorization": f"Bearer {data['access_token']}", "Accept": "application/json"})
     with _urlopen(req, timeout=15, proxy=proxy) as resp:
@@ -431,7 +477,7 @@ def graph_list_messages(cred: dict[str, Any], folder: str = "inbox", top: int = 
 
 def graph_get_message(cred: dict[str, Any], message_id: str) -> dict[str, Any]:
     proxy = cred.get("proxy") or ""
-    data = _request_access_token(cred.get("refresh_token", ""), cred.get("client_id", ""), GRAPH_SCOPE, proxy=proxy)
+    data = _refresh_token_for(cred, GRAPH_SCOPE)
     safe_id = urllib.parse.quote(message_id, safe="")
     params = urllib.parse.urlencode({"$select": "id,subject,body,bodyPreview,receivedDateTime,from,toRecipients,isRead"})
     req = urllib.request.Request(f"{GRAPH_BASE}/me/messages/{safe_id}?{params}", headers={"Authorization": f"Bearer {data['access_token']}", "Accept": "application/json"})
@@ -506,7 +552,7 @@ class OutlookEmailProvider(EmailProvider):
     help_text = ("账号格式（每行一个，---- 分隔）:\n"
                  "4 段：email----password----client_id----refresh_token\n"
                  "3 段：email----password----refresh_token（套用默认 client_id）\n"
-                 "2 段：email----password（IMAP 密码登录）")
+                 "注：微软已禁用 IMAP 密码登录，2 段格式无法收件，必须带 OAuth 凭据")
 
     def __init__(self) -> None:
         super().__init__()
@@ -559,7 +605,7 @@ class OutlookEmailProvider(EmailProvider):
 
     # ── Graph API ──────────────────────────────────────────
     def _graph_wait_code(self, cred: dict[str, Any], email: str, timeout: float, skip_codes: set[str] | None = None) -> dict[str, Any] | None:
-        data = _request_access_token(cred["refresh_token"], cred["client_id"], GRAPH_SCOPE)
+        data = _refresh_token_for(cred, GRAPH_SCOPE, email=email)
         access_token = data["access_token"]
         seen: set[str] = set()
         deadline = time.time() + timeout
@@ -577,7 +623,7 @@ class OutlookEmailProvider(EmailProvider):
                 except urllib.error.HTTPError as e:
                     if e.code == 401:
                         logger.info(f"[outlook-graph] 401 token 过期，重新刷新（folder={folder}）")
-                        data = _request_access_token(cred["refresh_token"], cred["client_id"], GRAPH_SCOPE)
+                        data = _refresh_token_for(cred, GRAPH_SCOPE, email=email)
                         access_token = data["access_token"]
                         continue
                     if e.code in (400, 403):
@@ -639,22 +685,24 @@ class OutlookEmailProvider(EmailProvider):
     def _imap_wait_code(
         self, cred: dict[str, Any], email: str, timeout: float, skip_codes: set[str] | None = None
     ) -> dict[str, Any] | None:
-        password = cred.get("password") or ""
         refresh_token = cred.get("refresh_token") or ""
         client_id = cred.get("client_id") or ""
         use_xoauth2 = bool(client_id and refresh_token)
-        use_password = bool(password)
-        if not use_xoauth2 and not use_password:
-            raise ProviderError("无可用 IMAP 凭据", fatal=True)
+        if not use_xoauth2:
+            # 微软已于 2025-09 全面禁用 Exchange Online 的 IMAP basic auth
+            # （实测密码登录返回 'Basic authentication is disabled'），
+            # 没有 OAuth 凭据的号没有可用的收件通道，直接 fatal。
+            raise ProviderError(
+                f"无 OAuth 凭据（client_id/refresh_token），IMAP 密码通道已被微软禁用",
+                fatal=True,
+            )
 
         logger.info(
-            f"[outlook-imap] 轮询开始 email={email} methods="
-            f"{'XOAUTH2' if use_xoauth2 else ''}{'+' if use_xoauth2 and use_password else ''}{'password' if use_password else ''}"
+            f"[outlook-imap] 轮询开始 email={email} method=XOAUTH2"
             f" 基线={len(self._baseline_ids)}封 baseline_at={self._baseline_at}"
         )
 
         cached_token = ""
-        cached_refresh = refresh_token
         cached_at = 0.0
         deadline = time.time() + timeout
         folders = ["INBOX", "Junk", "Junk Email", "Spam"]
@@ -665,22 +713,19 @@ class OutlookEmailProvider(EmailProvider):
         while time.time() < deadline:
             M = None
             try:
-                if use_xoauth2 and (not cached_token or time.time() - cached_at > 3000):
-                    try:
-                        data = _request_access_token(cached_refresh, client_id, IMAP_SCOPE)
-                        cached_token = data["access_token"]
-                        cached_at = time.time()
-                        if data.get("refresh_token"):
-                            cached_refresh = data["refresh_token"]
-                    except Exception as e:
-                        logger.warning(f"[outlook-imap] XOAUTH2 token 失败: {e}，禁用 XOAUTH2")
-                        use_xoauth2 = False
+                if not cached_token or time.time() - cached_at > 3000:
+                    # 互斥刷新；轮换的新 rt 由 _refresh_token_for 落库。
+                    # 刷新失败不再降级密码登录——那是死路，只会白耗 60s
+                    # 超时预算并给账号添一次异常登录记录。
+                    data = _refresh_token_for(cred, IMAP_SCOPE, email=email)
+                    cached_token = data["access_token"]
+                    cached_at = time.time()
 
                 last_err: Exception | None = None
                 for host in IMAP_SERVERS:
                     if M:
                         break
-                    if use_xoauth2 and cached_token:
+                    if cached_token:
                         try:
                             M = imaplib.IMAP4_SSL(host, 993, timeout=30)
                             auth_str = (
@@ -691,19 +736,6 @@ class OutlookEmailProvider(EmailProvider):
                         except Exception as e:
                             last_err = e
                             logger.info(f"[outlook-imap] ✗ XOAUTH2 登录失败 host={host}: {e}")
-                            try:
-                                M.logout()
-                            except Exception:
-                                pass
-                            M = None
-                    if not M and use_password:
-                        try:
-                            M = imaplib.IMAP4_SSL(host, 993, timeout=30)
-                            M.login(email, password)
-                            logger.info(f"[outlook-imap] ✓ 密码登录成功 host={host}")
-                        except Exception as e:
-                            last_err = e
-                            logger.info(f"[outlook-imap] ✗ 密码登录失败 host={host}: {e}")
                             try:
                                 M.logout()
                             except Exception:
