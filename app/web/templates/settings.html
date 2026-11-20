@@ -5,19 +5,22 @@
 <div class="page-sub">配置各邮箱源（Provider）的全局参数、管理 API Key</div>
 
 <div class="card">
-    <div class="card-title">API Key 管理</div>
-    <div class="form-row" style="align-items:flex-end">
-        <div><label>新增 API Key</label><input id="new-key" placeholder="留空自动生成"></div>
-        <div><button class="btn btn-success" onclick="addKey()">添加</button></div>
+    <div class="card-title">API Key 管理
+        <span style="flex:1"></span>
+        <button class="btn" onclick="openKeyDialog()">新建 API Key</button>
     </div>
     <div class="table-wrap">
     <table>
-        <thead><tr><th>Key</th><th>操作</th></tr></thead>
+        <thead><tr><th>Key</th><th style="width:160px">操作</th></tr></thead>
         <tbody>
         {% for k in api_keys %}
         <tr>
-            <td class="mono">{{ k }}</td>
-            <td><button class="btn btn-sm btn-danger" data-confirm="删除该 Key？" onclick="delKey('{{ k }}')">删除</button></td>
+            <td class="mono">
+                <span class="ak-mask" data-full="{{ k }}">{{ k[:10] }}{% if k|length > 14 %}••••••••{{ k[-4:] }}{% endif %}</span>
+                <button class="btn btn-sm btn-ghost" onclick="toggleKey(this)" title="显示/隐藏">👁</button>
+                <button class="btn btn-sm btn-ghost" onclick="copyKey(this)" title="复制">复制</button>
+            </td>
+            <td><button class="btn btn-sm btn-danger" data-confirm="删除该 Key？使用此 Key 的调用会立即失效。" onclick="delKey('{{ k }}')">删除</button></td>
         </tr>
         {% endfor %}
         </tbody>
@@ -27,6 +30,46 @@
     <div class="empty">未配置 API Key —— 当前 API 免鉴权开放（仅建议本机使用）</div>
     {% endif %}
     <div class="page-sub" style="margin-top:10px">调用方式：<code class="mono">Authorization: Bearer &lt;key&gt;</code></div>
+</div>
+
+<!-- ── 新建 API Key 弹窗（对齐迈巢：表单 → 一次性完整 Key 展示）── -->
+<div id="ak-dialog-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center">
+    <div style="background:var(--card,#fff);color:inherit;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:min(480px,92vw);max-height:90vh;overflow:auto;padding:20px 22px" onclick="event.stopPropagation()">
+
+        <!-- 表单态 -->
+        <div id="ak-form">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div style="font-size:18px;font-weight:600">新建 API Key</div>
+                <button class="btn btn-sm btn-ghost" onclick="closeKeyDialog()">✕</button>
+            </div>
+            <div style="display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:center">
+                <label style="font-size:14px;color:var(--muted,#64748b)">Key 值</label>
+                <input type="text" id="ak-custom" placeholder="留空自动生成" style="width:100%;box-sizing:border-box" class="mono">
+            </div>
+            <div class="page-sub" style="margin-top:10px">留空则自动生成随机 Key；自定义 Key 建议使用 <code class="mono">mp_</code> 前缀便于识别。</div>
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">
+                <button class="btn btn-ghost" onclick="closeKeyDialog()">取消</button>
+                <button class="btn" id="ak-create-btn" onclick="createKey()">创建</button>
+            </div>
+        </div>
+
+        <!-- 一次性展示态 -->
+        <div id="ak-reveal" style="display:none">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+                <div style="font-size:18px;font-weight:600">API Key 已创建</div>
+            </div>
+            <div style="background:var(--bg,#f6f7f9);border:1px dashed var(--border,#d0d7de);border-radius:8px;padding:14px;text-align:center">
+                <div id="ak-reveal-key" class="mono" style="font-size:15px;word-break:break-all;user-select:all"></div>
+            </div>
+            <div style="display:flex;justify-content:center;margin-top:12px">
+                <button class="btn" onclick="copyRevealKey()">复制 Key</button>
+            </div>
+            <div style="margin-top:14px;font-size:13px;color:#c0392b;font-weight:600;text-align:center">⚠ 请立即复制保存：关闭后无法再次查看完整 Key</div>
+            <div style="display:flex;justify-content:flex-end;margin-top:16px">
+                <button class="btn btn-ghost" onclick="finishKeyDialog()">我已保存，关闭</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 {% for p in providers %}
@@ -206,21 +249,74 @@ async function testProvider(id) {
             : '❌ ' + (res.data && res.data.message || '失败');
     } catch (err) { box.innerHTML = '❌ ' + err.message; }
 }
-async function addKey() {
-    const input = document.getElementById('new-key');
+// ── API Key 管理（对齐迈巢：新建弹窗 → 一次性展示完整 Key）──
+function openKeyDialog() {
+    document.getElementById('ak-form').style.display = '';
+    document.getElementById('ak-reveal').style.display = 'none';
+    document.getElementById('ak-custom').value = '';
+    document.getElementById('ak-dialog-mask').style.display = 'flex';
+    document.getElementById('ak-custom').focus();
+}
+
+function closeKeyDialog() {
+    document.getElementById('ak-dialog-mask').style.display = 'none';
+}
+
+function finishKeyDialog() {
+    closeKeyDialog();
+    location.reload();  // 回列表看到新 Key（掩码态）
+}
+
+async function createKey() {
+    const btn = document.getElementById('ak-create-btn');
+    const custom = document.getElementById('ak-custom').value.trim();
+    btn.disabled = true;
     try {
         const res = await api('/api/admin/api-keys', {
-            method: 'POST', body: JSON.stringify({ key: input.value.trim() || null }),
+            method: 'POST', body: JSON.stringify({ key: custom || null }),
         });
-        if (res.data.created && input.value === '') {
-            alert('新生成的 Key：\n' + res.data.created + '\n（请立即复制保存）');
-        }
-        location.reload();
-    } catch (err) { toast(err.message, 'error'); }
+        const created = (res.data && res.data.created) || '';
+        document.getElementById('ak-form').style.display = 'none';
+        document.getElementById('ak-reveal').style.display = '';
+        document.getElementById('ak-reveal-key').textContent = created;
+        toast('API Key 创建成功', 'success');
+    } catch (err) {
+        toast(err.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
 }
+
+function copyRevealKey() {
+    const key = document.getElementById('ak-reveal-key').textContent || '';
+    navigator.clipboard.writeText(key).then(
+        () => toast('Key 已复制', 'success'),
+        () => toast('复制失败，请手动选择复制', 'error'));
+}
+
+function toggleKey(btn) {
+    const span = btn.parentElement.querySelector('.ak-mask');
+    const full = span.dataset.full || '';
+    if (span.dataset.shown === '1') {
+        span.textContent = full.slice(0, 10) + (full.length > 14 ? '••••••••' + full.slice(-4) : '');
+        span.dataset.shown = '';
+    } else {
+        span.textContent = full;
+        span.dataset.shown = '1';
+    }
+}
+
+function copyKey(btn) {
+    const full = btn.parentElement.querySelector('.ak-mask').dataset.full || '';
+    navigator.clipboard.writeText(full).then(
+        () => toast('Key 已复制', 'success'),
+        () => toast('复制失败', 'error'));
+}
+
 async function delKey(key) {
     try {
         await api('/api/admin/api-keys/' + encodeURIComponent(key), { method: 'DELETE' });
+        toast('已删除', 'success');
         location.reload();
     } catch (err) { toast(err.message, 'error'); }
 }

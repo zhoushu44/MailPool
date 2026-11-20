@@ -6,12 +6,17 @@
         <div class="page-title">余额与充值</div>
         <div class="page-sub">充值到账后，取号先冻结、收到验证码才实扣</div>
     </div>
-    <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+    <div class="btn-row">
+        <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
+    </div>
 </div>
 
 <div class="card">
     <div class="mn-list-head" style="margin:0 0 14px">
         <div class="page-title" style="font-size:20px">{{ snapshot.balance }} <span style="font-size:14px">￥</span></div>
+        <button class="btn" id="mn-topup-btn" onclick="openTopup()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM18 18h3v3h-3z"/></svg>扫码充值
+        </button>
     </div>
     <div class="mn-account-grid">
         <div class="mn-account-item"><span class="mn-account-label">可用余额</span><span class="mono">{{ snapshot.available_balance }} ￥</span></div>
@@ -20,31 +25,6 @@
         <div class="mn-account-item"><span class="mn-account-label">充值卡充值</span><span class="mono">{{ snapshot.card_recharge }} ￥</span></div>
         <div class="mn-account-item"><span class="mn-account-label">赠送金额</span><span class="mono">{{ snapshot.award_amount }} ￥</span></div>
     </div>
-</div>
-
-<div class="card">
-    <div class="card-title">扫码充值</div>
-    <div class="mn-filter-row">
-        <div>
-            <label>充值金额</label>
-            <input type="text" id="mn-topup-amount" placeholder="最低 {{ billing_config.min_topup }} 元" value="10.00">
-        </div>
-        <div>
-            <label>支付方式</label>
-            <select id="mn-topup-paytype">
-                {% for c in channels %}
-                <option value="{{ c.name }}">{{ c.display_name }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div style="display:flex;align-items:flex-end">
-            <button class="btn" id="mn-topup-btn" {% if not channels %}disabled{% endif %} onclick="doTopup()">立即充值</button>
-        </div>
-    </div>
-    {% if not channels %}
-    <div class="mn-detail-hint" style="margin:10px 0 0">未配置易支付通道（billing.epay_url / pid / key），只能用充值卡充值。</div>
-    {% endif %}
-    <div id="mn-topup-result" style="margin-top:12px"></div>
 </div>
 
 <div class="card">
@@ -116,16 +96,150 @@
     <div class="empty">暂无充值订单</div>
     {% endif %}
 </div>
+
+<!-- ── 扫码充值弹窗（对齐迈巢：支付方式 + 金额 → 二维码 → 轮询自动到账）── -->
+<div id="mn-topup-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center" onclick="closeTopup()">
+    <div style="background:var(--card,#fff);color:inherit;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:min(520px,92vw);max-height:90vh;overflow:auto;padding:20px 22px" onclick="event.stopPropagation()">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+            <div style="font-size:18px;font-weight:600">充值</div>
+            <button class="btn btn-sm btn-ghost" onclick="closeTopup()">✕</button>
+        </div>
+
+        <!-- 表单态 -->
+        <div id="mn-topup-form">
+            <div style="display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:start;margin-bottom:16px">
+                <label style="padding-top:8px;font-size:14px;color:var(--muted,#64748b)">支付方式</label>
+                <div id="mn-pay-types" style="display:flex;flex-wrap:wrap;gap:10px 20px;padding-top:8px">
+                    {% for c in channels %}
+                    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:14px">
+                        <input type="radio" name="mn-paytype" value="{{ c.name }}" {% if loop.first %}checked{% endif %}>
+                        {{ c.display_name }}
+                    </label>
+                    {% endfor %}
+                </div>
+            </div>
+            <div style="display:grid;grid-template-columns:72px 1fr;gap:12px;align-items:center">
+                <label for="mn-topup-amount" style="font-size:14px;color:var(--muted,#64748b)">充值金额￥</label>
+                <input type="text" id="mn-topup-amount" inputmode="decimal" placeholder="请输入充值金额"
+                       style="width:100%;box-sizing:border-box">
+            </div>
+            {% if not channels %}
+            <div class="mn-detail-hint" style="margin-top:12px">未配置易支付通道（billing.epay_url / pid / key），暂时只能用充值卡充值。</div>
+            {% endif %}
+            <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px">
+                <button class="btn btn-ghost" onclick="closeTopup(true)">取消</button>
+                <button class="btn" id="mn-topup-submit" {% if not channels %}disabled{% endif %} onclick="submitTopup()">确定</button>
+            </div>
+        </div>
+
+        <!-- 支付态（二维码 / 已跳转） -->
+        <div id="mn-topup-paying" style="display:none;text-align:center;padding:12px 0 4px">
+            <div id="mn-topup-qr" style="display:flex;justify-content:center;min-height:220px;align-items:center"></div>
+            <div id="mn-topup-open" style="display:none;margin:8px 0">
+                <button class="btn btn-ghost" onclick="openPayPage()">在新窗口打开支付页面</button>
+            </div>
+            <div id="mn-topup-paytip" style="margin-top:14px;font-size:14px;color:var(--muted,#64748b)"></div>
+            <div style="margin-top:6px;font-size:12px;color:var(--muted,#94a3b8)">支付完成后将自动到账，请不要关闭本窗口</div>
+            <div style="display:flex;justify-content:center;margin-top:16px">
+                <button class="btn btn-ghost" onclick="closeTopup()">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
+<script src="/static/vendor/qrcode.min.js"></script>
 <script>
-async function doTopup() {
-    const btn = document.getElementById('mn-topup-btn');
+let _payUrl = '';      // 网关支付页地址（二维码 / 新窗口）
+let _payTradeNo = '';  // 轮询用的订单号
+let _pollTimer = null;
+let _lastPayType = '';
+
+function openTopup() {
+    document.getElementById('mn-topup-form').style.display = '';
+    document.getElementById('mn-topup-paying').style.display = 'none';
+    document.getElementById('mn-topup-mask').style.display = 'flex';
+    document.getElementById('mn-topup-amount').focus();
+}
+
+function closeTopup(skipConfirm) {
+    const paying = document.getElementById('mn-topup-paying').style.display !== 'none';
+    if (paying && !skipConfirm && !confirm('订单还未支付，确定要关闭吗？支付完成后余额仍会自动到账。')) {
+        return;
+    }
+    stopPoll();
+    document.getElementById('mn-topup-mask').style.display = 'none';
+    if (paying) {
+        // 从支付态退出（或已到账）：刷新余额与订单列表
+        location.reload();
+    }
+}
+
+function openPayPage() {
+    if (_payUrl) window.open(_payUrl, '_blank');
+}
+
+function showPaying() {
+    document.getElementById('mn-topup-form').style.display = 'none';
+    document.getElementById('mn-topup-paying').style.display = '';
+}
+
+function renderQr(url) {
+    const box = document.getElementById('mn-topup-qr');
+    box.innerHTML = '';
+    const openBtn = document.getElementById('mn-topup-open');
+    if (typeof QRCode === 'function') {
+        try {
+            new QRCode(box, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.M });
+            openBtn.style.display = 'none';
+            return;
+        } catch (e) { /* 渲染失败走降级 */ }
+    }
+    // 降级：没有二维码库就给个跳转按钮
+    box.innerHTML = '<div style="font-size:14px;color:var(--muted,#64748b)">已生成支付订单</div>';
+    openBtn.style.display = '';
+}
+
+function stopPoll() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+function startPoll(tradeNo) {
+    stopPoll();
+    _pollTimer = setInterval(async () => {
+        try {
+            const res = await api(`/api/v1/recharge/query?id=${encodeURIComponent(tradeNo)}`);
+            const st = (res.data && res.data.status) || '';
+            if (st === 'success') {
+                stopPoll();
+                toast('充值成功', 'success');
+                setTimeout(() => location.reload(), 600);
+            } else if (st === 'failed') {
+                stopPoll();
+                toast('支付失败，请重新下单', 'error');
+                document.getElementById('mn-topup-form').style.display = '';
+                document.getElementById('mn-topup-paying').style.display = 'none';
+            }
+        } catch (e) { /* 轮询失败静默重试 */ }
+    }, 3000);
+}
+
+async function submitTopup() {
+    const payType = (document.querySelector('input[name="mn-paytype"]:checked') || {}).value || '';
     const amount = (document.getElementById('mn-topup-amount').value || '').trim();
-    const payType = document.getElementById('mn-topup-paytype').value;
-    if (!amount) { toast('请输入充值金额', 'error'); return; }
+    const btn = document.getElementById('mn-topup-submit');
+
+    // 校验顺序对齐迈巢：支付方式 → 金额 → 格式 → 上下限
+    if (!payType) { toast('请选择支付方式', 'error'); return; }
+    if (!amount || isNaN(Number(amount))) { toast('请输入充值金额', 'error'); return; }
     if (!/^\d+(\.\d{1,2})?$/.test(amount)) { toast('充值金额最多支持 2 位小数', 'error'); return; }
+    const n = Number(amount);
+    const min = Number('{{ billing_config.min_topup }}' || '1');
+    const max = Number('{{ billing_config.max_topup }}' || '1000');
+    if (n < min) { toast(`充值金额不能低于 ${min} 元`, 'error'); return; }
+    if (n > max) { toast(`单次充值金额不能超过 ${max} 元`, 'error'); return; }
+
     btn.disabled = true;
     try {
         const res = await api('/api/v1/recharge/create', {
@@ -133,23 +247,22 @@ async function doTopup() {
             body: JSON.stringify({ amount: amount, pay_type: payType }),
         });
         const d = res.data;
-        if (d.key === 'urlscheme') {
-            // 生成表单自动提交跳网关
-            const form = document.createElement('form');
-            form.method = 'POST';
-            form.action = d.url;
-            for (const [k, v] of Object.entries(d.params || {})) {
-                const inp = document.createElement('input');
-                inp.type = 'hidden'; inp.name = k; inp.value = v;
-                form.appendChild(inp);
-            }
-            document.body.appendChild(form);
-            form.submit();
-        } else {
-            window.open(d.url, '_blank');
+        _payUrl = d.url || '';
+        _payTradeNo = d.trade_no || '';
+        const typeName = document.querySelector(`input[name="mn-paytype"][value="${payType}"]`)
+            ?.parentElement?.innerText?.trim() || payType;
+
+        showPaying();
+        renderQr(_payUrl);
+        document.getElementById('mn-topup-paytip').textContent = `请使用${typeName}扫码完成支付`;
+        if (d.key === 'urlscheme' && _payUrl) {
+            // 电脑上不方便扫码：自动帮用户开网关支付页（手机扫码用上面的二维码）
+            window.open(_payUrl, '_blank');
         }
+        startPoll(_payTradeNo);
     } catch (err) {
         toast(err.message, 'error');
+    } finally {
         btn.disabled = false;
     }
 }
@@ -168,5 +281,11 @@ async function doRedeem() {
         toast(err.message, 'error');
     }
 }
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.getElementById('mn-topup-mask').style.display !== 'none') {
+        closeTopup();
+    }
+});
 </script>
 {% endblock %}
