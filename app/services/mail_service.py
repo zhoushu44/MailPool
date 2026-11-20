@@ -407,9 +407,13 @@ def list_mail_records(
     project_code: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    emails: list[str] | None = None,
 ) -> list[MailRecord]:
+    """emails：邮箱白名单过滤（客户数据边界用），优先级高于 email 单查。"""
     stmt = select(MailRecord).order_by(MailRecord.received_at.desc())
-    if email:
+    if emails is not None:
+        stmt = stmt.where(MailRecord.email.in_(emails))
+    elif email:
         stmt = stmt.where(MailRecord.email == email.lower())
     if project_code:
         stmt = stmt.where(MailRecord.project_code == project_code)

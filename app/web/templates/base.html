@@ -44,7 +44,7 @@
         {% elif user_logged_in %}
         <nav class="nav">
             <a href="/buy-email" class="nav-item {% if active == 'buy-email' %}active{% endif %}">购买邮箱</a>
-            <a href="/orders" class="nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>
+            {% if billing_on %}<a href="/orders" class="nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>{% endif %}
             <a href="/recharges" class="nav-item {% if active == 'recharges' %}active{% endif %}">余额与充值</a>
             <a href="/balances" class="nav-item {% if active == 'balances' %}active{% endif %}">费用明细</a>
         </nav>

@@ -76,6 +76,12 @@ def _render(request: Request, template: str, **ctx):
     ctx.setdefault("user_logged_in", bool(get_session(request).get("user_id")))
     ctx.setdefault("active", "")
     ctx.setdefault("has_password", bool(settings.admin_password))
+    # 计费开关：客户菜单「下单流水」仅在计费开启时显示（关闭时无用户归属）
+    if "billing_on" not in ctx:
+        from ..database import SessionLocal
+
+        with SessionLocal() as s:
+            ctx["billing_on"] = billing_service.is_billing_enabled(s)
     # 新式调用（request 在前）：starlette >= 0.29 与 1.x 都支持；
     # 旧式 TemplateResponse(name, ctx) 在 starlette 1.x 会把 dict 当模板名而报
     # TypeError: unhashable type: 'dict'（部署到新环境时踩过）。
@@ -334,6 +340,11 @@ def orders_page(
     uid = _current_user_id(request, db) or 0
     is_admin = _is_admin(request)
 
+    # 计费关闭时 email_usages 聚合没有用户归属（查不了「自己的」），
+    # 为避免客户看到全平台的取号记录，客户一律引去商城。
+    if not billing_on and not is_admin:
+        return RedirectResponse("/buy-email", status_code=303)
+
     if billing_on:
         orders, total = billing_service.list_email_orders(
             db, None if is_admin else uid,
@@ -346,6 +357,7 @@ def orders_page(
             user_names = _user_name_map(db)
         rows = [
             {
+                "order_id": o.id,
                 "email": o.email,
                 "project_code": o.project_code,
                 "project_name": proj_names.get(o.project_code, o.project_code),
@@ -356,6 +368,7 @@ def orders_page(
                 "last_received_at": o.charged_at,
                 "code": "",
                 "mail_count": 0,
+                "pooled": True,  # 订单全部来自 Outlook 号池
                 "user_id": o.user_id,
                 "username": user_names.get(o.user_id, ""),
             }

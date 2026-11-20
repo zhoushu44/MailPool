@@ -44,6 +44,7 @@
                 {% if billing_on %}<th>单价</th><th>计费状态</th>{% else %}<th>邮箱状态</th>{% endif %}
                 <th>获取时间</th>
                 <th>最新收件</th>
+                {% if billing_on %}<th style="width:70px">操作</th>{% endif %}
             </tr></thead>
             <tbody>
             {% for r in rows %}
@@ -52,8 +53,14 @@
                 {% if is_admin %}
                 <td>{{ r.username or '—' }} <span class="mono" style="color:var(--muted,#94a3b8)">#{{ r.user_id }}</span></td>
                 {% endif %}
-                <td><a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}&project_code={{ r.project_code|urlencode }}">{{ r.email }}</a></td>
-                <td><span class="badge badge-temp">临时</span></td>
+                <td>
+                    {% if is_admin %}
+                    <a class="mn-email-link" href="/mailbox?email={{ r.email|urlencode }}&project_code={{ r.project_code|urlencode }}">{{ r.email }}</a>
+                    {% else %}
+                    <span class="mono">{{ r.email }}</span>
+                    {% endif %}
+                </td>
+                <td><span class="badge {{ 'badge-available' if r.pooled else 'badge-temp' }}">{{ '号池' if r.pooled else '临时' }}</span></td>
                 <td>{{ r.project_name }}</td>
                 <td class="mono">{{ r.project_code }}</td>
                 {% if billing_on %}
@@ -84,6 +91,13 @@
                     {% else %}-{% endif %}
                     {% if r.mail_count %}<span class="mn-count">{{ r.mail_count }}封</span>{% endif %}
                 </td>
+                {% if billing_on %}
+                <td>
+                    {% if r.order_id %}
+                    <button class="btn btn-sm btn-ghost" onclick="openOrderLog({{ r.order_id }})">详情</button>
+                    {% else %}-{% endif %}
+                </td>
+                {% endif %}
             </tr>
             {% endfor %}
             </tbody>
@@ -102,4 +116,67 @@
     <div class="empty">暂无下单流水，可到「购买邮箱」商城取号</div>
     {% endif %}
 </div>
+{% endblock %}
+
+{% block scripts %}
+<!-- ── 订单详情弹窗（对齐迈巢订单日志）── -->
+<div id="orderLogModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+    <div style="background:var(--card,#fff);color:inherit;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:min(720px,92vw);max-height:88vh;overflow:auto;padding:20px 22px" onclick="event.stopPropagation()">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+            <div>
+                <div style="font-size:18px;font-weight:600">订单详情</div>
+                <div id="orderLogSub" style="font-size:13px;color:var(--muted,#64748b);margin-top:2px">订单收件日志</div>
+            </div>
+            <button class="btn btn-sm btn-ghost" onclick="document.getElementById('orderLogModal').style.display='none'">✕</button>
+        </div>
+        <div id="orderLogMeta" style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px;margin-bottom:14px"></div>
+        <div class="table-wrap" style="max-height:420px">
+            <table>
+                <thead><tr>
+                    <th style="width:48px">序号</th>
+                    <th>发件人</th>
+                    <th>主题</th>
+                    <th>验证码</th>
+                    <th>接收时间</th>
+                </tr></thead>
+                <tbody id="orderLogBody"></tbody>
+            </table>
+        </div>
+        <div id="orderLogEmpty" class="empty" style="display:none">该订单还没有收到任何邮件</div>
+    </div>
+</div>
+<script>
+const ORDER_LOG_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function orderLogEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ORDER_LOG_ESC[c]); }
+
+async function openOrderLog(orderId) {
+    const mask = document.getElementById('orderLogModal');
+    mask.style.display = 'flex';
+    try {
+        const res = await api(`/api/v1/email/orders/${orderId}/mails`);
+        const d = res.data || {};
+        const o = d.order || {};
+        document.getElementById('orderLogSub').textContent =
+            `${o.email || ''} · 项目 ${o.project_code || ''}`;
+        document.getElementById('orderLogMeta').innerHTML = [
+            ['单价', `￥${orderLogEsc(o.price || '0')}`],
+            ['已扣费', `￥${orderLogEsc(o.charged_amount || '0')}`],
+            ['状态', orderLogEsc(o.billing_status === 'charged' ? '已扣费' : o.billing_status === 'free' ? '未扣费' : '待确认')],
+            ['取号时间', orderLogEsc((o.created_at || '').replace('T', ' ').slice(0, 19))],
+        ].map(([k, v]) => `<div><span style="font-size:13px;color:var(--muted,#64748b)">${k}：</span><span class="mono" style="font-size:13px">${v}</span></div>`).join('');
+        const items = d.items || [];
+        document.getElementById('orderLogEmpty').style.display = items.length ? 'none' : 'block';
+        document.getElementById('orderLogBody').innerHTML = items.map((m, i) => `
+            <tr>
+                <td class="mono">${i + 1}</td>
+                <td class="mono">${orderLogEsc(m.sender || '—')}</td>
+                <td>${orderLogEsc(m.subject || '(无主题)')}</td>
+                <td>${m.code ? `<span class="badge badge-code">${orderLogEsc(m.code)}</span>` : '—'}</td>
+                <td class="mono" style="white-space:nowrap">${orderLogEsc((m.received_at || '').replace('T', ' ').slice(0, 19))}</td>
+            </tr>`).join('');
+    } catch (e) {
+        toast(`加载订单详情失败：${e.message || e}`);
+    }
+}
+</script>
 {% endblock %}

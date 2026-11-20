@@ -113,22 +113,84 @@ function switchTab(name, el) {
     document.getElementById('tab-temp').style.display = name === 'temp' ? '' : 'none';
     document.getElementById('tab-exclusive').style.display = name === 'exclusive' ? '' : 'none';
 }
+
+const BUY_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+function buyEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => BUY_ESC[c]); }
+
 async function buyEmail(projectCode) {
     if (!confirm('确认购买（取号）项目 ' + projectCode + '？')) return;
     try {
-        const res = await api('/api/admin/mails/buy', {
+        const res = await api('/api/v1/email/temporary/buy', {
             method: 'POST',
-            body: JSON.stringify({ project_code: projectCode }),
+            body: JSON.stringify({ project_code: projectCode, count: 1 }),
         });
-        const email = res.data.email;
+        // MailNest 格式：code=00000 成功；D0001 余额不足等
+        if (res.code && res.code !== '00000') { toast(res.msg || '取号失败', 'error'); return; }
+        const item = Array.isArray(res.data) ? res.data[0] : res.data;
+        const email = item && (item.email || item.address) || '';
+        if (!email) { toast('取号返回为空', 'error'); return; }
         toast('取号成功：' + email, 'success');
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            try { await navigator.clipboard.writeText(email); toast('邮箱地址已复制', 'success'); }
-            catch { /* 忽略剪贴板错误 */ }
-        }
+        openWaitCode(email, projectCode);
     } catch (err) {
         toast(err.message, 'error');
     }
 }
+
+// ── 取号成功后的收码等待弹窗（客户不下商城页，直接等码）──
+let _waitTimer = null;
+function closeWaitCode() {
+    if (_waitTimer) { clearTimeout(_waitTimer); _waitTimer = null; }
+    document.getElementById('mn-wait-mask').style.display = 'none';
+}
+
+function openWaitCode(email, projectCode) {
+    document.getElementById('mn-wait-email').textContent = email;
+    document.getElementById('mn-wait-code').textContent = '';
+    document.getElementById('mn-wait-status').textContent = '正在等待验证码，每 5 秒自动查询一次（最长 90 秒）…';
+    document.getElementById('mn-wait-copy').style.display = 'none';
+    document.getElementById('mn-wait-mask').style.display = 'flex';
+    const startedAt = Date.now();
+    const poll = async () => {
+        try {
+            const res = await api('/api/v1/email/receive', {
+                method: 'POST',
+                body: JSON.stringify({ project_code: projectCode, email, timeout: 5 }),
+            });
+            if (res.code === '00000' && res.data && res.data.status === 'success' && res.data.code) {
+                document.getElementById('mn-wait-code').textContent = res.data.code;
+                document.getElementById('mn-wait-status').textContent = '收到验证码！';
+                document.getElementById('mn-wait-copy').style.display = '';
+                return;
+            }
+            if (Date.now() - startedAt > 90000) {
+                document.getElementById('mn-wait-status').textContent = '等待超时。验证码可能稍后到达，可稍后再来订单流水查看，或直接重新查询。';
+                return;
+            }
+        } catch (e) { /* 网络抖动继续轮询 */ }
+        _waitTimer = setTimeout(poll, 5000);
+    };
+    poll();
+}
+
+function copyWaitCode() {
+    const code = document.getElementById('mn-wait-code').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(code).then(() => toast('验证码已复制', 'success')).catch(() => {});
+    }
+}
 </script>
+
+<!-- ── 收码等待弹窗 ── -->
+<div id="mn-wait-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeWaitCode()">
+    <div style="background:var(--card,#fff);color:inherit;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:min(460px,92vw);max-height:90vh;overflow:auto;padding:20px 22px;text-align:center" onclick="event.stopPropagation()">
+        <div style="font-size:18px;font-weight:600;margin-bottom:6px">等待验证码</div>
+        <div id="mn-wait-email" class="mono" style="font-size:14px;color:var(--muted,#64748b);word-break:break-all"></div>
+        <div id="mn-wait-code" class="mono" style="font-size:34px;font-weight:700;letter-spacing:.14em;margin:18px 0 6px;min-height:44px"></div>
+        <div id="mn-wait-status" style="font-size:13px;color:var(--muted,#64748b)"></div>
+        <div style="display:flex;justify-content:center;gap:10px;margin-top:16px">
+            <button id="mn-wait-copy" class="btn" style="display:none" onclick="copyWaitCode()">复制验证码</button>
+            <button class="btn btn-ghost" onclick="closeWaitCode()">关闭</button>
+        </div>
+    </div>
+</div>
 {% endblock %}

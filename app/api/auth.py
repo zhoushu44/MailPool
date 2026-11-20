@@ -164,9 +164,10 @@ async def require_api_key_or_session(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> User | None:
-    """两种身份任选其一即可通过：
+    """三种身份任选其一即可通过：
       - 合法 API Key（绑了用户就返回该用户）
-      - 网页登录会话（客户在后台页面上操作）
+      - 网页登录会话（客户在后台页面上操作）→ 返回该客户
+      - 管理员网页会话 → 返回 None（各端点内部用 check_admin_access 识别）
 
     没有 API Key 又没登录 → 401。
     """
@@ -179,6 +180,9 @@ async def require_api_key_or_session(
         user = db.get(User, int(uid))
         if user is not None and user.status == 1:
             return user
+    # 管理员会话（admin_ok）或口令头：放行，按匿名身份处理
+    if check_admin_access(request):
+        return None
     raise HTTPException(status_code=401, detail="需要有效的用户身份（API Key 绑定用户或网页登录）")
 
 

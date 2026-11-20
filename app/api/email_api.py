@@ -12,18 +12,18 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import project_logo_src
 from ..database import get_db
-from ..models import MailRecord
+from ..models import EmailOrder, MailRecord
 from ..providers import ProviderError
 from ..services import billing_service, mail_service, pool_service
 from ..timeutil import utc_iso
-from .auth import current_user, require_api_key
+from .auth import current_user, require_api_key_or_session
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,34 @@ def err(code: str, msg: str) -> dict[str, Any]:
     return {"code": code, "msg": msg, "type": "error", "data": None}
 
 
+def _owns_email(db: Session, request: Any, user: Any, email: str, project_code: str) -> bool:
+    """当前请求者能否操作该邮箱。
+
+    - 管理员（会话/口令头）：任意邮箱
+    - 匿名 key（老 key/本机自用，user=None）：放行（保持旧集成行为）
+    - 绑定用户的 key / 网页客户会话：必须是该用户名下的取号订单邮箱
+      （防止横向收别人的验证码）
+    - 计费关闭时不建订单（user_id=0），没有归属数据可查 → 放行
+    """
+    from .auth import check_admin_access
+
+    if check_admin_access(request):
+        return True
+    if user is None or not billing_service.is_billing_enabled(db):
+        return True
+    email = (email or "").strip().lower()
+    return (
+        db.scalar(
+            select(EmailOrder.id).where(
+                EmailOrder.user_id == user.id,
+                EmailOrder.email == email,
+                EmailOrder.project_code == project_code,
+            )
+        )
+        is not None
+    )
+
+
 def _map_provider_error(exc: ProviderError) -> dict[str, Any]:
     """ProviderError → 业务状态码。
 
@@ -65,7 +93,9 @@ def _map_provider_error(exc: ProviderError) -> dict[str, Any]:
 
 # /api/product/info 无需鉴权（对齐 MailNest），其余走 /api/v1 + Bearer Key
 public_router = APIRouter(prefix="/api")
-router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_key)])
+# 鉴权：API Key 或网页客户会话任一即可（对齐 MailNest：客户页与第三方共用端点）。
+# require_api_key_or_session 对纯 key 调用的行为与原 require_api_key 完全等价。
+router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_api_key_or_session)])
 
 
 class BuyBody(BaseModel):
@@ -237,6 +267,7 @@ def buy_email(
 @router.post("/email/receive")
 def receive_code(
     body: ReceiveBody,
+    request: Request,
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ) -> dict[str, Any]:
@@ -258,6 +289,8 @@ def receive_code(
     project = mail_service.get_project(db, body.project_code.strip())
     if not project:
         return err(CODE_NO_PROJECT, "项目不存在或已停用")
+    if not _owns_email(db, request, user, body.email.strip(), project.code):
+        return err(CODE_OP_FAILED, "当前无法对此邮箱执行该操作")
     try:
         result = mail_service.receive_code(
             db,
@@ -287,6 +320,7 @@ def receive_code(
 @router.post("/email/release")
 def release_email(
     body: ReleaseBody,
+    request: Request,
     db: Session = Depends(get_db),
     user=Depends(current_user),
 ) -> dict[str, Any]:
@@ -294,6 +328,8 @@ def release_email(
     project = mail_service.get_project(db, body.project_code.strip())
     if not project:
         return err(CODE_NO_PROJECT, "项目不存在或已停用")
+    if not _owns_email(db, request, user, body.email.strip(), project.code):
+        return err(CODE_OP_FAILED, "当前无法对此邮箱执行该操作")
     try:
         result = mail_service.release_email(db, project.code, body.email.strip())
     except ProviderError as exc:
@@ -318,23 +354,54 @@ def release_email(
 
 @router.get("/mails")
 def query_mails(
+    request: Request,
     email: str | None = Query(default=None),
     project_code: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=500),
     db: Session = Depends(get_db),
+    user=Depends(require_api_key_or_session),
 ) -> dict[str, Any]:
-    """查询收件记录（按邮箱或项目过滤，分页返回）。"""
+    """查询收件记录（按邮箱或项目过滤，分页返回）。
+
+    数据边界：管理员看全部；客户/绑定用户的 key 只能看自己订单里的邮箱；
+    匿名 key（老 key 未绑定用户）一律 403，防止横向翻别人的验证码。
+    """
+    from .auth import check_admin_access
+
+    scope_emails: set[str] | None = None  # None = 不限制（管理员）
+    if not check_admin_access(request):
+        if user is None:
+            raise HTTPException(status_code=403, detail="匿名 API Key 无权查询收件记录")
+        scope_emails = set(
+            db.scalars(select(EmailOrder.email).where(EmailOrder.user_id == user.id))
+        )
+        if email and email.lower() not in scope_emails:
+            return ok({"total": 0, "page": page, "page_size": page_size, "items": []})
+
     stmt = select(func.count()).select_from(MailRecord)
     if email:
         stmt = stmt.where(MailRecord.email == email.lower())
     if project_code:
         stmt = stmt.where(MailRecord.project_code == project_code)
+    if scope_emails is not None:
+        if not scope_emails:
+            return ok({"total": 0, "page": page, "page_size": page_size, "items": []})
+        stmt = stmt.where(MailRecord.email.in_(scope_emails))
     total = db.scalar(stmt) or 0
 
+    # 客户数据边界：emails 白名单过滤。指定 email 时（已在白名单内验证过）
+    # 缩窄为单邮箱，避免白名单吞掉 email 参数。
+    if scope_emails is not None and email:
+        emails_arg: list[str] | None = [email.lower()]
+    elif scope_emails is not None:
+        emails_arg = sorted(scope_emails)
+    else:
+        emails_arg = None
     records = mail_service.list_mail_records(
         db, email=email, project_code=project_code,
         limit=page_size, offset=(page - 1) * page_size,
+        emails=emails_arg,
     )
     items = [
         {
@@ -355,6 +422,53 @@ def query_mails(
         for r in records
     ]
     return ok({"total": total, "page": page, "page_size": page_size, "items": items})
+
+
+@router.get("/email/orders/{order_id}/mails")
+def order_mail_logs(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user=Depends(require_api_key_or_session),
+) -> dict[str, Any]:
+    """单个取号订单的收件日志（对齐 MailNest 订单详情弹窗）。
+
+    管理员可看任意订单；客户只能看自己的。
+    """
+    from .auth import check_admin_access
+
+    order = db.get(EmailOrder, order_id)
+    if order is None:
+        return err(CODE_NO_PROJECT, "订单不存在")
+    if not check_admin_access(request):
+        if user is None or order.user_id != user.id:
+            raise HTTPException(status_code=403, detail="无权查看该订单")
+    records = mail_service.list_mail_records(
+        db, email=order.email, project_code=order.project_code, limit=50,
+    )
+    items = [
+        {
+            "id": r.id,
+            "sender": r.sender,
+            "subject": r.subject,
+            "code": r.code,
+            "received_at": utc_iso(r.received_at),
+        }
+        for r in records
+    ]
+    return ok({
+        "order": {
+            "id": order.id,
+            "email": order.email,
+            "project_code": order.project_code,
+            "billing_status": order.billing_status,
+            "price": billing_service.fmt_milli(order.price),
+            "charged_amount": billing_service.fmt_milli(order.charged_amount),
+            "created_at": utc_iso(order.created_at),
+        },
+        "total": len(items),
+        "items": items,
+    })
 
 
 @router.get("/health")
