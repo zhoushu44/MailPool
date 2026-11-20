@@ -838,3 +838,18 @@ code { font-family: "Consolas", ui-monospace, monospace; background: var(--muted
     .btn-sm { padding: 4px 8px; font-size: 12px; }
 }
 
+
+/* ── 客户视图与管理视图的视觉区分 ──────────────────────
+   管理员：默认顶栏；客户：品牌副标变绿色徽章 + 高亮项绿色。
+   两套菜单在 base.html 按 admin_ok / user_logged_in 渲染。 */
+body.customer-view .brand-sub {
+    color: #16a34a;
+    background: rgba(22, 163, 74, .12);
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-weight: 600;
+}
+body.customer-view .nav-item.active {
+    background: rgba(22, 163, 74, .12);
+    color: #15803d;
+}

@@ -54,7 +54,8 @@ _PUBLIC_PREFIXES = (
 
 # 客户自助页：登录了客户账号就能看，不需要管理员口令。
 # 这些页面只读自己的余额/流水/订单，不碰号池凭证。
-_CUSTOMER_PATHS = ("/recharges", "/balances", "/user/")
+# /buy-email 商城与 /orders 下单流水在数据层按 is_admin 过滤（客户只看自己的）。
+_CUSTOMER_PATHS = ("/recharges", "/balances", "/user/", "/buy-email", "/orders")
 
 
 def _customer_logged_in(request: Request) -> bool:

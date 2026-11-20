@@ -16,10 +16,11 @@
     <script src="/static/js/app.js"></script>
     {% block head %}{% endblock %}
 </head>
-<body>
+<body class="{% if admin_ok %}admin-view{% elif user_logged_in %}customer-view{% endif %}">
 <header class="topbar">
     <div class="topbar-inner">
-        <a href="/" class="brand"><img class="brand-mark" src="/static/img/logo.svg" alt="MailPool"> MailPool<span class="brand-sub">邮箱接收平台</span></a>
+        <a href="{% if admin_ok %}/{% elif user_logged_in %}/buy-email{% endif %}" class="brand"><img class="brand-mark" src="/static/img/logo.svg" alt="MailPool"> MailPool<span class="brand-sub">{% if admin_ok %}邮箱接收平台{% elif user_logged_in %}客户中心{% endif %}</span></a>
+        {% if admin_ok %}
         <nav class="nav">
             <a href="/" class="nav-item {% if active == 'dashboard' %}active{% endif %}">仪表盘</a>
             <a href="/overview" class="nav-item {% if active == 'overview' %}active{% endif %}">总览</a>
@@ -38,10 +39,25 @@
             <a href="/account" class="nav-item {% if active == 'account' %}active{% endif %}">账户资料</a>
             <a href="/settings" class="nav-item {% if active == 'settings' %}active{% endif %}">设置</a>
             <a href="/docs/api-overview" target="_blank" class="btn btn-ghost btn-sm">API 文档</a>
-            {% if admin_ok %}
             <a href="/logout" class="btn btn-sm">退出登录</a>
-            {% endif %}
         </div>
+        {% elif user_logged_in %}
+        <nav class="nav">
+            <a href="/buy-email" class="nav-item {% if active == 'buy-email' %}active{% endif %}">购买邮箱</a>
+            <a href="/orders" class="nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>
+            <a href="/recharges" class="nav-item {% if active == 'recharges' %}active{% endif %}">余额与充值</a>
+            <a href="/balances" class="nav-item {% if active == 'balances' %}active{% endif %}">费用明细</a>
+        </nav>
+        <div class="topbar-right">
+            <a href="/docs/api-overview" target="_blank" class="btn btn-ghost btn-sm">API 文档</a>
+            <a href="/user/logout" class="btn btn-sm">退出登录</a>
+        </div>
+        {% else %}
+        <nav class="nav"></nav>
+        <div class="topbar-right">
+            <a href="/docs/api-overview" target="_blank" class="btn btn-ghost btn-sm">API 文档</a>
+        </div>
+        {% endif %}
     </div>
 </header>
 <main class="content">

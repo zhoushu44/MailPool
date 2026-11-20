@@ -72,6 +72,8 @@ def _render(request: Request, template: str, **ctx):
 
     ctx.setdefault("request", request)
     ctx.setdefault("admin_ok", _admin_ok(request))
+    # 客户登录态：base.html 据此渲染客户菜单（与管理菜单区分）
+    ctx.setdefault("user_logged_in", bool(get_session(request).get("user_id")))
     ctx.setdefault("active", "")
     ctx.setdefault("has_password", bool(settings.admin_password))
     # 新式调用（request 在前）：starlette >= 0.29 与 1.x 都支持；
