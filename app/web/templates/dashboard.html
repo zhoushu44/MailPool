@@ -2,7 +2,7 @@
 {% block title %}仪表盘{% endblock %}
 {% block content %}
 <div class="page-title">仪表盘</div>
-<div class="page-sub">选择项目接收验证码，临时邮箱与固定号池一览</div>
+<div class="page-sub">选择项目接收验证码，Outlook 号池库存一览</div>
 
 <div class="stats-grid">
     <div class="stat-card">
@@ -35,8 +35,7 @@
     {% if projects %}
     <div class="mp-tabs">
         <button class="mp-tab active" onclick="filterProjects(this, 'all')">全部</button>
-        <button class="mp-tab" onclick="filterProjects(this, 'temporary')">临时邮箱</button>
-        <button class="mp-tab" onclick="filterProjects(this, 'pooled')">固定邮箱</button>
+        <button class="mp-tab" onclick="filterProjects(this, 'pooled')">号池项目</button>
     </div>
     <div class="project-grid">
         {% for p in projects %}

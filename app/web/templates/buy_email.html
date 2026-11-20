@@ -4,17 +4,17 @@
 <div class="mn-list-head">
     <div>
         <div class="page-title">购买邮箱</div>
-        <div class="page-sub">选择临时邮箱或独占邮箱进行购买</div>
+        <div class="page-sub">从 Outlook 号池按项目取号，收到验证码才完成使用</div>
     </div>
 </div>
 
 <div class="mn-tabs">
-    <button type="button" class="mn-tab active" onclick="switchTab('temp', this)">临时邮箱</button>
+    <button type="button" class="mn-tab active" onclick="switchTab('temp', this)">邮箱购买</button>
     <button type="button" class="mn-tab" onclick="switchTab('exclusive', this)">独占邮箱</button>
 </div>
 
 <div id="tab-temp">
-    <div class="mn-mall-note">临时邮箱仅在有效期内接收对应项目的邮件。系统会根据一定规则对邮件进行过滤：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若在临时邮箱中没有你需要的项目，可以点击「联系我们」申请项目。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}</div>
+    <div class="mn-mall-note">邮箱来自私有 Outlook 号池：取号即绑定当前项目，本项目用过的邮箱不会再发给你，释放后回池供其他项目使用。系统会按规则过滤邮件：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若没有你需要的项目，可以点击「联系我们」申请项目。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}</div>
 
     {% if projects %}
     <div class="mn-mall-list">

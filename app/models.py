@@ -34,7 +34,7 @@ class Project(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(128), default="")
-    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # mailnest / cf_temp / tempmail / outlook ...
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)  # 当前只有 outlook 号池
     # provider 特定参数，如 {"product_code": "chatgpt001", "timeout": 120}
     config_json: Mapped[str] = mapped_column(Text, default="{}")
     enabled: Mapped[int] = mapped_column(Integer, default=1)
@@ -42,10 +42,8 @@ class Project(Base):
 
 
 class EmailAccount(Base):
-    """邮箱池：已经持有的邮箱账号（凭证 + 状态）。
-
-    - 临时源（tempmail/cf_temp）：动态创建，不入池；池内仅记录历史。
-    - 固定源（outlook / mailnest 购买的独享号）：入池，可 claim。
+    """邮箱池：已经持有的邮箱账号（凭证 + 状态），固定源入池可 claim。
+    （临时源已移除，池里只剩 outlook 号。）
     """
 
     __tablename__ = "email_accounts"
@@ -98,16 +96,20 @@ class MailRecord(Base):
 
 
 class EmailUsage(Base):
-    """邮箱使用记录（防复用）：一个邮箱地址一旦被任何项目用过，即作废。
+    """邮箱使用记录（按项目防复用）。
 
-    - email 唯一：只用一次的邮箱，任何项目（含原项目）都不可再取
-    - 释放回池后绑定保留，杜绝跨项目或同项目复用
+    - (email, project_code) 唯一：同一个邮箱**同一个项目**只能用一次；
+      其他项目仍可取用该邮箱（A 项目用过，B 项目还能用）
+    - 释放回池后绑定保留，本项目永远不可再取
     """
 
     __tablename__ = "email_usages"
+    __table_args__ = (
+        UniqueConstraint("email", "project_code", name="uq_email_usage_project"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    email: Mapped[str] = mapped_column(String(254), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(254), index=True, nullable=False)
     project_code: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     first_used_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
@@ -324,7 +326,8 @@ class EmailOrder(Base):
 
     __tablename__ = "email_orders"
     __table_args__ = (
-        UniqueConstraint("email", name="uq_email_order_email"),
+        # 同一邮箱可被多个项目各买一次，但同一项目同一邮箱只有一单
+        UniqueConstraint("email", "project_code", name="uq_email_order_project"),
         Index("ix_email_orders_user_billing", "user_id", "billing_status"),
     )
 

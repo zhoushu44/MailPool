@@ -361,14 +361,36 @@ def hold(
     return order
 
 
+def _find_order(db: Session, email: str, project_code: str | None):
+    """按邮箱找计费订单。
+
+    同一邮箱可被多个项目各买一次（按项目一次性），
+    所以优先级：带 project_code 时精确匹配；否则先找 pending（最可能是本次取号），
+    再退回最新一单。
+    """
+    email = email.lower()
+    stmt = select(EmailOrder).where(EmailOrder.email == email)
+    if project_code:
+        stmt = stmt.where(EmailOrder.project_code == project_code)
+        return db.scalar(stmt)
+    order = db.scalar(
+        stmt.where(EmailOrder.billing_status == "pending")
+        .order_by(EmailOrder.id.desc())
+    )
+    if order is not None:
+        return order
+    return db.scalar(stmt.order_by(EmailOrder.id.desc()))
+
+
 def charge(
     db: Session,
     user_id: int,
     email: str,
     remark: str = "",
+    project_code: str | None = None,
 ) -> EmailOrder | None:
     """收到验证码 → 真扣：frozen -= price, balance -= price。"""
-    order = db.scalar(select(EmailOrder).where(EmailOrder.email == email.lower()))
+    order = _find_order(db, email, project_code)
     if order is None:
         return None
     if order.billing_status == "charged":
@@ -408,9 +430,10 @@ def release(
     user_id: int,
     email: str,
     remark: str = "",
+    project_code: str | None = None,
 ) -> EmailOrder | None:
     """释放/超时 → 解冻：frozen -= price，balance 不变，订单标记 free。"""
-    order = db.scalar(select(EmailOrder).where(EmailOrder.email == email.lower()))
+    order = _find_order(db, email, project_code)
     if order is None:
         return None
     if order.billing_status in ("charged", "free"):

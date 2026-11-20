@@ -119,8 +119,8 @@ def build_provider(db: Session, project: Project):
 def acquire_email(db: Session, project_code: str) -> dict[str, Any]:
     """按 project_code 取一个邮箱。
 
-    临时源（mailnest/cf_temp/tempmail）：直接生成新地址，并绑定到项目（防跨项目复用）。
-    固定源（outlook）：从号池 claim（跳过已被其他项目绑定的邮箱），claim 后绑定。
+    固定源（outlook）：从号池 claim（跳过**本项目**已用过的邮箱），claim 后绑定。
+    按项目一次性：A 项目用过的号，A 取不到，其他项目照常可取。
     """
     project = get_project(db, project_code)
     if not project:
@@ -130,10 +130,11 @@ def acquire_email(db: Session, project_code: str) -> dict[str, Any]:
 
     # 固定号池：claim 账号并注入凭证
     if prov.pooled:
-        claimed = pool_service.claim_account(db, project.provider)
+        claimed = pool_service.claim_account(db, project.provider, project.code)
         if not claimed:
             raise ProviderError(
-                f"邮箱池 [{project.provider}] 无可用账号（被使用过的邮箱已全部排除，请先导入或检查状态）",
+                f"邮箱池 [{project.provider}] 无可用账号（本项目用过的邮箱已排除，"
+                "请先导入或检查状态）",
                 fatal=False,
                 kind="no_stock",
             )
@@ -142,7 +143,7 @@ def acquire_email(db: Session, project_code: str) -> dict[str, Any]:
         if not ok:
             pool_service.release_account(db, account_id=claimed["account_id"])
             raise ProviderError(
-                f"邮箱 {claimed['email']} 已被使用过（{other}），已跳过该号",
+                f"邮箱 {claimed['email']} 已被本项目使用过，已跳过该号",
                 fatal=False,
                 kind="no_stock",
             )
@@ -286,22 +287,25 @@ def receive_code(
 def release_email(db: Session, project_code: str, email: str) -> dict[str, Any]:
     """释放邮箱。
 
-    ⚠️ 语义很重要（很容易误解）：
-    - **固定号池（pooled=True）**：这是**永久消耗**，返回
-      `status="retired", permanently_consumed=True`。
-      号池里的邮箱都是"用过即作废"（email_usages 里留记录，任何项目都不能再取），
-      释放**不会**让它回到可领取池。别指望 release 后还能再取到同一个号。
+    ⚠️ 语义（按项目一次性）：
+    - **固定号池（pooled=True）**：解除占用、**回池**，返回
+      `status="released", reusable_for_other_projects=True`。
+      本项目的使用绑定保留 —— 该项目永远取不到这个号；
+      其他项目照常可取。
     - 临时源（pooled=False）：真正释放上游地址，返回 `status="released"`。
     """
     project = get_project(db, project_code)
     if not project:
         raise ProviderError(f"未知项目 code: {project_code}")
     normalized_email = email.lower()
-    usage = db.scalar(select(EmailUsage).where(EmailUsage.email == normalized_email))
+    usage = db.scalar(
+        select(EmailUsage).where(
+            EmailUsage.email == normalized_email,
+            EmailUsage.project_code == project.code,
+        )
+    )
     if not usage:
         return {"email": email, "status": "not_found", "pooled": False}
-    if usage.project_code != project.code:
-        raise ProviderError(f"邮箱 {email} 不属于项目 {project.code}")
     prov, _ = build_provider(db, project)
     if prov.pooled:
         acc = db.scalar(select(EmailAccount).where(EmailAccount.email == normalized_email))
@@ -309,11 +313,11 @@ def release_email(db: Session, project_code: str, email: str) -> dict[str, Any]:
             pool_service.release_account(db, account_id=acc.id)
             return {
                 "email": email,
-                "status": "retired",
+                "status": "released",
                 "pooled": True,
-                "permanently_consumed": True,
-                "reusable": False,
-                "message": "号池邮箱已永久消耗，释放后不会回到可领取池",
+                "reusable": True,
+                "reusable_for_other_projects": True,
+                "message": "已释放回池：本项目不可再取该邮箱，其他项目仍可取",
             }
         return {"email": email, "status": "not_found", "pooled": True}
     prov.release(email)

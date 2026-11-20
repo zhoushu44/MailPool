@@ -80,7 +80,7 @@
             <tr><td>code</td><td>string</td><td>项目编码，取号时传入</td></tr>
             <tr><td>name</td><td>string</td><td>项目名称</td></tr>
             <tr><td>icon</td><td>string / null</td><td>项目图标地址</td></tr>
-            <tr><td>stock</td><td>number / null</td><td>当前可取的号量（固定号池实时计算；临时源为 null）</td></tr>
+            <tr><td>stock</td><td>number / null</td><td>当前可取的号量（号池项目实时计算，按项目各自统计）</td></tr>
             <tr><td>sender_domains</td><td>string</td><td>发件域名过滤（逗号分隔），命中即放行</td></tr>
             <tr><td>mail_keywords</td><td>string</td><td>邮件关键词过滤（逗号分隔），命中即放行</td></tr>
         </tbody>
@@ -89,7 +89,7 @@
 
 <section class="doc-section">
     <h2>2. 取号（购买临时邮箱）</h2>
-    <p>按项目取一个邮箱。临时源新建地址；固定号池取出未用过的账号。该邮箱立即绑定当前项目，其他项目不可再用。</p>
+    <p>按项目取一个邮箱。号池取出本项目没用过的账号。该邮箱立即绑定当前项目，本项目不可再次取用；其他项目不受影响。</p>
     <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/email/temporary/buy</code></div>
     <h3>请求参数</h3>
     <table class="doc-table">
@@ -113,8 +113,8 @@
     "msg": "",
     "type": "",
     "data": {
-        "email": "example@tempmail.lol",
-        "provider": "tempmail",
+        "email": "example@outlook.com",
+        "provider": "outlook",
         "project_code": "chatgpt001",
         "project_name": "ChatGPT 注册",
         "account_id": null,
@@ -144,7 +144,7 @@
     -H "Content-Type: application/json" \
     -d '{
         "project_code": "chatgpt001",
-        "email": "example@tempmail.lol",
+        "email": "example@outlook.com",
         "timeout": 120
     }'</pre>
     <h3>响应示例（成功）</h3>
@@ -153,7 +153,7 @@
     "msg": "",
     "type": "",
     "data": {
-        "email": "example@tempmail.lol",
+        "email": "example@outlook.com",
         "code": "123456",
         "status": "success",
         "elapsed": 8.5
@@ -166,7 +166,7 @@
     "msg": "",
     "type": "",
     "data": {
-        "email": "example@tempmail.lol",
+        "email": "example@outlook.com",
         "code": "",
         "status": "timeout",
         "elapsed": 120.0,
@@ -177,7 +177,7 @@
 
 <section class="doc-section">
     <h2>4. 释放邮箱</h2>
-    <p>主动释放未收件的邮箱：临时源销毁地址，固定池账号回池（仍不可被其他项目复用）。</p>
+    <p>主动释放未收件的邮箱：号池账号回池供其他项目继续使用（本项目仍不可复用）。</p>
     <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/email/release</code></div>
     <h3>请求参数</h3>
     <table class="doc-table">
@@ -193,7 +193,7 @@
     -H "Content-Type: application/json" \
     -d '{
         "project_code": "chatgpt001",
-        "email": "example@tempmail.lol"
+        "email": "example@outlook.com"
     }'</pre>
     <h3>响应示例</h3>
     <pre class="doc-code">{
@@ -201,7 +201,7 @@
     "msg": "",
     "type": "",
     "data": {
-        "email": "example@tempmail.lol",
+        "email": "example@outlook.com",
         "status": "released",
         "pooled": false
     }
@@ -237,7 +237,7 @@
         "items": [
             {
                 "id": 1,
-                "email": "example@tempmail.lol",
+                "email": "example@outlook.com",
                 "project_code": "chatgpt001",
                 "sender": "no-reply@openai.com",
                 "subject": "Your verification code",
@@ -262,8 +262,7 @@
     "data": {
         "status": "online",
         "providers": [
-            { "id": "mailnest", "name": "MailNest 临时邮箱", "configured": true },
-            { "id": "cf_temp", "name": "CF 临时邮箱", "configured": false }
+            { "id": "outlook", "name": "Outlook 号池", "pooled": true, "configured": true, "stock": 798 }
         ],
         "project_count": 1
     }

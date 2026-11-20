@@ -420,29 +420,29 @@ def count_accounts(db: Session, provider: str | None = None) -> dict[str, int]:
 
 
 def email_usage_map(db: Session) -> dict[str, str]:
-    """返回 {email: project_code} 全量绑定映射。"""
-    return {
-        u.email.lower(): u.project_code
-        for u in db.scalars(select(EmailUsage))
-    }
+    """返回 {email: "项目A,项目B"} 的绑定映射（一个邮箱可能绑了多个项目）。"""
+    out: dict[str, list[str]] = {}
+    for u in db.scalars(select(EmailUsage)):
+        out.setdefault(u.email.lower(), []).append(u.project_code)
+    return {email: ",".join(codes) for email, codes in out.items()}
 
 
-def email_usage_for(db: Session, emails: list[str]) -> dict[str, str]:
-    """按邮箱列表查绑定映射（仅查涉及邮箱，避免全表加载）。"""
+def email_usage_for(db: Session, emails: list[str]) -> dict[str, list[str]]:
+    """按邮箱列表查绑定映射 {email: [project_code, ...]}。"""
     keys = [e.strip().lower() for e in emails if e and e.strip()]
     if not keys:
         return {}
-    return {
-        u.email.lower(): u.project_code
-        for u in db.scalars(select(EmailUsage).where(EmailUsage.email.in_(keys)))
-    }
+    out: dict[str, list[str]] = {}
+    for u in db.scalars(select(EmailUsage).where(EmailUsage.email.in_(keys))):
+        out.setdefault(u.email.lower(), []).append(u.project_code)
+    return out
 
 
 def bind_email(db: Session, email: str, project_code: str) -> tuple[bool, str | None]:
     """绑定邮箱到项目。返回 (ok, conflict_project)。
 
-    一个邮箱只要被任何项目用过（写入绑定），就永远不可再取——
-    即使再次被同一项目申请也视为冲突（用过即作废）。
+    按项目一次性：同一邮箱同一项目只能绑一次（重复取 → 冲突）；
+    其他项目绑同一邮箱不受影响。
     """
     key = (email or "").strip().lower()
     if not key:
@@ -453,28 +453,37 @@ def bind_email(db: Session, email: str, project_code: str) -> tuple[bool, str | 
         return True, None
     except IntegrityError:
         db.rollback()
-        usage = db.scalar(select(EmailUsage).where(EmailUsage.email == key))
-        return False, usage.project_code if usage else None
+        usage = db.scalar(
+            select(EmailUsage).where(
+                EmailUsage.email == key, EmailUsage.project_code == project_code
+            )
+        )
+        return False, usage.project_code if usage else project_code
 
 
 def used_by_other_project(db: Session, email: str, project_code: str) -> bool:
-    """该邮箱是否已被任何项目使用过（含当前项目，用过即作废）。"""
+    """该邮箱是否已被**本项目**使用过（按项目一次性）。"""
     key = (email or "").strip().lower()
     if not key:
         return False
-    return db.scalar(select(EmailUsage.id).where(EmailUsage.email == key)) is not None
+    return db.scalar(
+        select(EmailUsage.id).where(
+            EmailUsage.email == key, EmailUsage.project_code == project_code
+        )
+    ) is not None
 
 
-def claim_account(db: Session, provider: str) -> dict[str, Any] | None:
+def claim_account(db: Session, provider: str, project_code: str = "") -> dict[str, Any] | None:
     """从号池 claim 一个 available 账号，标记 using。返回凭证 dict。
 
-    跳过所有被使用过（已绑定）的邮箱：无论归属哪个项目，用过即作废。
+    按项目一次性：只跳过**本项目**用过（已绑定）的邮箱，
+    其他项目用过的照样能取。
     只发「healthy / unknown」的号：unhealthy（检测失败过）和 dead 一律不发，
     避免把已知有问题的账号发给客户造成取件失败。
     """
-    logger.info(f"[claim] 取号请求 provider={provider}")
+    logger.info(f"[claim] 取号请求 provider={provider} project={project_code}")
     recover_abandoned_claims(db)
-    taken = select(EmailUsage.email)
+    taken = select(EmailUsage.email).where(EmailUsage.project_code == project_code)
     stmt = (
         select(EmailAccount)
         .where(
@@ -504,13 +513,14 @@ def claim_account(db: Session, provider: str) -> dict[str, Any] | None:
     return None
 
 
-def count_claimable(db: Session, provider: str) -> int:
-    """可 claim 数量：available + healthy/unknown 且未被其他项目绑定的邮箱数。
+def count_claimable(db: Session, provider: str, project_code: str = "") -> int:
+    """该项目可 claim 数量：available + healthy/unknown 且**未被本项目用过**的邮箱数。
 
     与 claim_account 的口径必须一致，否则页面显示"有 1000 个"但实际取不到。
+    按项目算：A 项目用过的号只从 A 的库存里扣，其他项目库存不变。
     用 SQL COUNT 聚合，不再把全部 id 拉到 Python 里数（995 行 × 53 次调用 = 秒级）。
     """
-    taken = select(EmailUsage.email)
+    taken = select(EmailUsage.email).where(EmailUsage.project_code == project_code)
     return int(
         db.scalar(
             select(func.count(EmailAccount.id)).where(
@@ -525,7 +535,11 @@ def count_claimable(db: Session, provider: str) -> int:
 
 
 def recover_abandoned_claims(db: Session) -> dict[str, int]:
-    """处理超时占用：未绑定账号回池，已绑定账号永久退役。"""
+    """处理超时占用：一律回池 available。
+
+    按项目一次性语义下，被某项目绑定的邮箱对其他项目仍可用，
+    所以不再退役 —— 绑定记录（email_usages）保留，本项目取不到即可。
+    """
     cutoff = _naive_utc(_now()) - CLAIM_LEASE_TIMEOUT
     accounts = list(db.scalars(
         select(EmailAccount).where(
@@ -537,27 +551,22 @@ def recover_abandoned_claims(db: Session) -> dict[str, int]:
     if not accounts:
         return {"recovered": 0, "retired": 0}
 
-    used = email_usage_for(db, [acc.email for acc in accounts])
-    recovered = 0
-    retired = 0
     for acc in accounts:
-        if acc.email.lower() in used:
-            acc.pool_status = "retired"
-            retired += 1
-        else:
-            acc.pool_status = "available"
-            recovered += 1
+        acc.pool_status = "available"
         acc.claimed_at = None
         _sync_legacy_status(acc)
     db.commit()
-    logger.info(
-        f"[claim-recovery] recovered={recovered} retired={retired}"
-    )
-    return {"recovered": recovered, "retired": retired}
+    logger.info(f"[claim-recovery] recovered={len(accounts)}")
+    return {"recovered": len(accounts), "retired": 0}
 
 
 def release_account(db: Session, account_id: int | None = None, email: str | None = None) -> bool:
-    """释放已领取账号并永久退役，避免再次进入可领取池。"""
+    """释放已领取账号，**回池**给其他项目继续用。
+
+    按项目一次性：释放只解除占用（using → available），
+    本项目的使用绑定（email_usages）保留 —— 该项目再也取不到这个号，
+    但其他项目照常可取。账号不退役。
+    """
     conditions = []
     if account_id:
         conditions.append(EmailAccount.id == account_id)
@@ -569,21 +578,22 @@ def release_account(db: Session, account_id: int | None = None, email: str | Non
     res = db.execute(
         update(EmailAccount)
         .where(*conditions, EmailAccount.pool_status == "using")
-        .values(
-            pool_status="retired",
-            status="retired",
-            claimed_at=None,
-        )
+        .values(pool_status="available", claimed_at=None)
     )
     db.commit()
     if res.rowcount == 1:
-        logger.info(f"[release] 释放成功 account_id={account_id} email={email}")
+        # 同步旧 status 字段（跟随 health_status），保持 UI/API 兼容
+        acc = db.scalar(select(EmailAccount).where(*conditions))
+        if acc is not None:
+            _sync_legacy_status(acc)
+            db.commit()
+        logger.info(f"[release] 释放回池成功 account_id={account_id} email={email}")
         return True
-    # 未命中「using」状态：账号存在但本来就不在占用中，不能假装退役成功。
+    # 未命中「using」状态：账号存在但本来就不在占用中，不能假装释放成功。
     acc = db.scalar(select(EmailAccount).where(*conditions))
     if acc is not None:
         logger.info(
-            f"[release] 账号 {acc.email} 当前 pool_status={acc.pool_status}，非 using，跳过退役"
+            f"[release] 账号 {acc.email} 当前 pool_status={acc.pool_status}，非 using，跳过"
         )
         return False
     return False
@@ -1304,17 +1314,10 @@ def poll_device_code_flow(db: Session, account_id: int) -> dict[str, Any]:
             # 否则授权成功了账号却仍是 retired，永远取不到（历史 bug）。
             revived = False
             if acc.pool_status == "retired":
-                used = db.scalar(
-                    select(EmailUsage.id).where(EmailUsage.email == acc.email.lower())
-                )
-                if used is None:
-                    acc.pool_status = "available"
-                    acc.claimed_at = None
-                    revived = True
-                else:
-                    logger.info(
-                        f"[deviceflow] {acc.email} 已被项目 {used} 使用过，保持 retired（不复活）"
-                    )
+                # 按项目一次性：使用记录只挡对应项目，号本身可以回池
+                acc.pool_status = "available"
+                acc.claimed_at = None
+                revived = True
             _sync_legacy_status(acc)
             db.commit()
             logger.info(

@@ -4,15 +4,14 @@
 但完全独立实现，不依赖 RegiForge 代码。
 
     pooled     号是"持有的固定账号，claim/释放"（Outlook 私有号池）
-    ephemeral  地址是不是每次现造（CF 随机地址 / TempMail 创建）
+    ephemeral  地址是不是每次现造
 
-四种组合都存在：
+当前只有号池型：
     provider            pooled  ephemeral   说明
     ─────────────────── ─────── ─────────   ──────────────────────
-    mailnest             False   True       购买临时邮箱，用完释放
-    cf_temp              False   True       自造随机地址，无限量
-    tempmail             False   True       创建临时 inbox
     outlook              True    False      导入的固定号池，claim 用
+
+（临时源 mailnest / cf_temp / tempmail 已于 2026-11-20 移除，只保留号池。）
 """
 from __future__ import annotations
 
@@ -280,7 +279,7 @@ def list_providers() -> list[dict[str, Any]]:
 
 # 延迟 import 触发注册
 def _load_registry() -> None:
-    from . import cf_temp, mailnest, outlook, tempmail  # noqa: F401
+    from . import outlook  # noqa: F401
 
 
 _load_registry()

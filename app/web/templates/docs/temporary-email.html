@@ -2,17 +2,17 @@
 {% block doc_title_block %}临时邮箱{% endblock %}
 {% block doc_content %}
 
-<p class="page-sub">按项目取号、收验证码的短期邮箱，用完即释放，支持批量获取。</p>
+<p class="page-sub">按项目取号、收验证码的邮箱，用完即释放，支持批量获取。</p>
 
 <section class="doc-section">
     <h2>工作原理</h2>
-    <p>MailPool 的「临时邮箱」不是固定邮箱，而是<strong>按项目产出的一次性地址</strong>：</p>
+    <p>MailPool 的邮箱来自<strong>私有 Outlook 号池</strong>：</p>
     <ol class="doc-ol">
-        <li>调用取号接口，按 <code>project_code</code> 路由到对应邮箱源</li>
-        <li>临时源（MailNest / CF / TempMail）直接生成新地址；固定号池（Outlook）从池中取一个未用过的账号</li>
-        <li>该地址<strong>立即绑定到当前项目</strong>——被任何项目用过的邮箱，其他项目（含原项目）都不会再拿到</li>
+        <li>调用取号接口，按 <code>project_code</code> 路由到号池</li>
+        <li>从池中取一个<strong>本项目没再用过的</strong>可用账号</li>
+        <li>该地址<strong>立即绑定到当前项目</strong>——本项目用过的邮箱不会再拿到；其他项目不受影响，照常可取</li>
         <li>轮询取码接口直到收到验证码（或超时）</li>
-        <li>释放后临时地址销毁 / 池号归还</li>
+        <li>释放后账号归还号池，供其他项目继续使用</li>
     </ol>
 </section>
 
@@ -21,9 +21,6 @@
     <table class="doc-table">
         <thead><tr><th>邮箱源</th><th>类型</th><th>特点</th></tr></thead>
         <tbody>
-            <tr><td>MailNest 临时邮箱</td><td>临时</td><td>调用迈巢平台购买，支持发件域名 / 关键词匹配</td></tr>
-            <tr><td>CF 临时邮箱</td><td>临时</td><td>Cloudflare 临时域名，秒级生成</td></tr>
-            <tr><td>TempMail.lol</td><td>临时</td><td>公共临时邮箱接口</td></tr>
             <tr><td>Outlook 号池</td><td>固定</td><td>自备账号导入池中，轮换使用，账号被封自动标记</td></tr>
         </tbody>
     </table>
@@ -42,8 +39,8 @@
     <pre class="doc-code">{
     "code": "00000",
     "data": [
-        { "email": "a@tempmail.lol", "status": "holding" },
-        { "email": "b@tempmail.lol", "status": "holding" },
+        { "email": "a@outlook.com", "status": "holding" },
+        { "email": "b@outlook.com", "status": "holding" },
         ...
     ]
 }</pre>

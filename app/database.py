@@ -54,12 +54,87 @@ def get_db():
         db.close()
 
 
+def _unique_index_columns(conn, table: str) -> list[list[str]]:
+    """返回表上所有唯一索引覆盖的列组合（用于检测老约束）。"""
+    out = []
+    for row in conn.exec_driver_sql(f"PRAGMA index_list({table})").fetchall():
+        # PRAGMA index_list: seq, name, unique, origin, partial
+        if not row[2]:
+            continue
+        cols = [r[2] for r in conn.exec_driver_sql(f"PRAGMA index_info({row[1]})").fetchall()]
+        out.append(cols)
+    return out
+
+
+def _migrate_usage_constraints(conn) -> None:
+    """老库迁移：邮箱使用从「全局一次性」改为「按项目一次性」。
+
+    - email_usages：email 单列唯一 → (email, project_code) 组合唯一
+      （A 项目用过的邮箱，其他项目仍可绑定）
+    - email_orders：email 单列唯一 → (email, project_code) 组合唯一
+
+    SQLite 没法 DROP 列约束，只能重建表。老数据原样拷贝（老约束保证
+    email 无重复行，拷贝不会撞新约束）。
+    """
+    jobs = [
+        (
+            "email_usages",
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "email VARCHAR(254) NOT NULL, "
+            "project_code VARCHAR(64) NOT NULL, "
+            "first_used_at DATETIME, "
+            "CONSTRAINT uq_email_usage_project UNIQUE (email, project_code)",
+            "id, email, project_code, first_used_at",
+        ),
+        (
+            "email_orders",
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "user_id INTEGER NOT NULL, "
+            "email VARCHAR(254) NOT NULL, "
+            "project_code VARCHAR(64), "
+            "provider VARCHAR(32), "
+            "price BIGINT, "
+            "billing_status VARCHAR(16), "
+            "hold_amount BIGINT, "
+            "charged_amount BIGINT, "
+            "created_at DATETIME, "
+            "charged_at DATETIME, "
+            "released_at DATETIME, "
+            "CONSTRAINT uq_email_order_project UNIQUE (email, project_code)",
+            "id, user_id, email, project_code, provider, price, billing_status, "
+            "hold_amount, charged_amount, created_at, charged_at, released_at",
+        ),
+    ]
+    for table, create_cols, copy_cols in jobs:
+        exists = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue  # 新库由 create_all 直接按新约束建
+        uniques = _unique_index_columns(conn, table)
+        # 已经是 (email, project_code) 组合唯一 → 无需迁移
+        if any(set(cols) == {"email", "project_code"} for cols in uniques):
+            continue
+        conn.exec_driver_sql(f"ALTER TABLE {table} RENAME TO {table}_old")
+        conn.exec_driver_sql(f"CREATE TABLE {table} ({create_cols})")
+        conn.exec_driver_sql(
+            f"INSERT INTO {table} ({copy_cols}) SELECT {copy_cols} FROM {table}_old"
+        )
+        conn.exec_driver_sql(f"DROP TABLE {table}_old")
+        # 补常用索引（RENAME 后跟随旧表被 DROP 了）
+        conn.exec_driver_sql(f"CREATE INDEX IF NOT EXISTS ix_{table}_email ON {table}(email)")
+        conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS ix_{table}_project_code ON {table}(project_code)"
+        )
+
+
 def init_db() -> None:
     from . import models  # noqa: F401  确保模型已注册
 
     Base.metadata.create_all(bind=engine)
     # 高频排序字段补索引（下单流水按首次使用时间分页）
     with engine.begin() as conn:
+        _migrate_usage_constraints(conn)
         conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_email_usages_first_used_at "
             "ON email_usages (first_used_at)"

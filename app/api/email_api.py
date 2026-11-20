@@ -93,7 +93,8 @@ def product_info(db: Session = Depends(get_db)) -> dict[str, Any]:
     计费开启时 price 给出真实单价（元），关闭时为空串（免费）。
     """
     temporary = []
-    stock_cache: dict[str, int] = {}   # 53 个项目共用 outlook 池，只查一次
+    stock_cache: dict[tuple[str, str], int] = {}  # (provider, project_code) → 库存
+    # 按项目一次性：每个项目排除自己用过的邮箱，库存各不相同
     billing_on = billing_service.is_billing_enabled(db)
     for p in mail_service.list_projects(db):
         if not p.enabled:
@@ -105,9 +106,10 @@ def product_info(db: Session = Depends(get_db)) -> dict[str, Any]:
             merged, prov = {}, None
         pooled = bool(getattr(prov, "pooled", False)) if prov else False
         if pooled:
-            if p.provider not in stock_cache:
-                stock_cache[p.provider] = pool_service.count_claimable(db, p.provider)
-            stock = stock_cache[p.provider]
+            ck = (p.provider, p.code)
+            if ck not in stock_cache:
+                stock_cache[ck] = pool_service.count_claimable(db, p.provider, p.code)
+            stock = stock_cache[ck]
         else:
             stock = None
         cfg = json.loads(p.config_json or "{}") if isinstance(p.config_json, str) else {}
@@ -274,6 +276,7 @@ def receive_code(
             billing_service.charge(
                 db, user.id, body.email.strip(),
                 remark=f"收码扣费 {body.email.strip()}",
+                project_code=project.code,
             )
             db.commit()
         except Exception as exc:
@@ -303,6 +306,7 @@ def release_email(
             billing_service.release(
                 db, user.id, body.email.strip(),
                 remark=f"释放解冻 {body.email.strip()}",
+                project_code=project.code,
             )
             db.commit()
         except Exception as exc:
