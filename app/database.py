@@ -126,21 +126,43 @@ def _migrate_usage_constraints(conn) -> None:
         conn.exec_driver_sql(
             f"CREATE INDEX IF NOT EXISTS ix_{table}_project_code ON {table}(project_code)"
         )
-        if table == "email_usages":
-            # 老语义把「被用过」的号全部退役了；新语义下绑定只挡对应项目，
-            # 健康（非 dead）的 retired 号全部回池，其他项目立即可取。
-            res = conn.exec_driver_sql(
-                "UPDATE email_accounts SET pool_status='available', claimed_at=NULL "
-                "WHERE pool_status='retired' AND health_status IN ('healthy', 'unknown')"
-            )
-            # 同步旧 status 字段（available 时跟随 health）
-            conn.exec_driver_sql(
-                "UPDATE email_accounts SET status = "
-                "CASE WHEN health_status IN ('healthy','unhealthy','dead') "
-                "THEN health_status ELSE 'available' END "
-                "WHERE pool_status='available'"
-            )
-            print(f"[migrate] 按项目一次性：回收 retired 号 {res.rowcount} 个回池")
+    for table, create_cols, copy_cols in jobs:
+        exists = conn.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if not exists:
+            continue  # 新库由 create_all 直接按新约束建
+        uniques = _unique_index_columns(conn, table)
+        # 已经是 (email, project_code) 组合唯一 → 无需迁移
+        if any(set(cols) == {"email", "project_code"} for cols in uniques):
+            continue
+        conn.exec_driver_sql(f"ALTER TABLE {table} RENAME TO {table}_old")
+        conn.exec_driver_sql(f"CREATE TABLE {table} ({create_cols})")
+        conn.exec_driver_sql(
+            f"INSERT INTO {table} ({copy_cols}) SELECT {copy_cols} FROM {table}_old"
+        )
+        conn.exec_driver_sql(f"DROP TABLE {table}_old")
+        # 补常用索引（RENAME 后跟随旧表被 DROP 了）
+        conn.exec_driver_sql(f"CREATE INDEX IF NOT EXISTS ix_{table}_email ON {table}(email)")
+        conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS ix_{table}_project_code ON {table}(project_code)"
+        )
+
+    # 老语义把「被用过」的号全部退役了；新语义下绑定只挡对应项目，
+    # 健康（非 dead）的 retired 号全部回池。幂等：每次启动跑一遍，
+    # 新代码里没有任何路径会把健康号置 retired，所以此后的 rowcount 恒为 0。
+    res = conn.exec_driver_sql(
+        "UPDATE email_accounts SET pool_status='available', claimed_at=NULL "
+        "WHERE pool_status='retired' AND health_status IN ('healthy', 'unknown')"
+    )
+    conn.exec_driver_sql(
+        "UPDATE email_accounts SET status = "
+        "CASE WHEN health_status IN ('healthy','unhealthy','dead') "
+        "THEN health_status ELSE 'available' END "
+        "WHERE pool_status='available'"
+    )
+    if res.rowcount:
+        print(f"[migrate] 按项目一次性：回收 retired 号 {res.rowcount} 个回池")
 
 
 def init_db() -> None:
