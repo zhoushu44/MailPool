@@ -6,6 +6,25 @@
 
 ## [Unreleased]
 
+### 变更
+
+**邮箱复用改为「按项目一次性」**
+
+- 之前：邮箱被**任何**项目用过就全局作废（释放也不回池），号池消耗极快
+- 现在：A 项目用过的邮箱只有 A 不能再取，**其他项目照常可取**，释放即回池
+- `email_usages` / `email_orders` 唯一约束从 email 单列改为 (email, project_code) 组合，`init_db` 自动迁移老库（数据不动）
+- `/api/product/info` 的 `stock` 按项目各自统计（每个项目只扣自己用掉的）
+- 计费 `charge`/`release` 按项目匹配订单，防同邮箱多项目订单串单
+
+**移除临时邮箱源**
+
+- 删除 MailNest 临时邮箱 / CF Worker 临时邮箱 / TempMail.lol 三个 provider（代码 + UI + 文档）
+- 邮箱源只剩 Outlook 私有号池
+
+---
+
+## [1.1] - 2026-11-18
+
 ### 新增
 
 **计费体系（充值抄 new-api，扣费抄 MailNest）**
