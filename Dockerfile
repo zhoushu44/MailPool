@@ -61,7 +61,11 @@ RUN groupadd --gid 1000 mailpool \
     && chown -R mailpool:mailpool /app
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# 双保险：去掉可能的 CRLF + 加执行位
+# （Windows 上编辑过的 .sh 带 CRLF 时，Linux 会报
+#   "exec ...: no such file or directory"，看起来像文件不存在，实际是换行符）
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 # 注意：不写 USER mailpool —— entrypoint 需要 root 才能 chown，内部会降权
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

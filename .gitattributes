@@ -1,0 +1,17 @@
+# 统一换行：容器内执行的脚本必须是 LF，否则 Linux 报
+#   "exec /usr/local/bin/docker-entrypoint.sh: no such file or directory"
+# （这个报错看起来是"文件不存在"，实际是 CRLF 导致 shebang 无法解析）
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf
+Dockerfile text eol=lf
+
+# 其余文本按平台默认
+*.py text
+*.md text
+*.html text
+*.css text
+*.js text
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text
+*.json text
