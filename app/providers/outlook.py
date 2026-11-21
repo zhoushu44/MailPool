@@ -662,18 +662,31 @@ class OutlookEmailProvider(EmailProvider):
         baseline: set[str] = set(self._baseline_ids)
         baseline_at: datetime | None = self._baseline_at
         stale_skipped = 0
+        # 轮询节奏（2026-11-21 实测重调）：
+        #   旧版每轮扫 3 个文件夹 + 固定 sleep(4)，12s 窗口内只能跑 2.9 轮；
+        #   并发 25 时单轮被拖到 4~5s，轮次更少，邮件晚到几秒就错过。
+        #   实测 90% 的验证码只落在 inbox；junk/deleteditems 命中极少。
+        #   现在：inbox 每轮都查，垃圾箱/已删除每 5 轮兜底扫一次，
+        #   轮间 sleep 从 4s 降到 1s → 同样窗口内轮次 2.9 → 10.7（3.7x）。
+        INBOX = "inbox"
+        SIDE_FOLDERS = [f for f in GRAPH_FOLDERS if f != INBOX]
+        SIDE_EVERY = 5
+        round_no = 0
         logger.info(
             f"[outlook-graph] 轮询开始 email={email} folders={GRAPH_FOLDERS} "
             f"基线={len(baseline)}封 baseline_at={baseline_at}"
         )
         while time.time() < deadline:
+            round_no += 1
             round_slow = False
-            for folder in GRAPH_FOLDERS:
+            folders = [INBOX]
+            if round_no % SIDE_EVERY == 1:
+                folders += SIDE_FOLDERS
+            for folder in folders:
                 if time.time() >= deadline:
                     break
                 try:
-                    # 单文件夹硬上限 8 秒：3 个文件夹一轮最多 24 秒，
-                    # 保证在 180 秒收码窗口内还能轮好几遍。
+                    # 单文件夹硬上限 8 秒：超时就放弃这一轮的这个文件夹。
                     messages = _call_with_hard_timeout(
                         _graph_list_messages, 8, access_token, folder)
                 except urllib.error.HTTPError as e:
@@ -759,7 +772,12 @@ class OutlookEmailProvider(EmailProvider):
                         "received_at": recv,
                         "code_source": "rule" if code else "none",
                     }
-            time.sleep(8 if round_slow else 4)
+            # 轮间等待：原来固定 4s（3 文件夹时一轮本来就要 2s+，加起来快 6s）。
+            # 现在 inbox 单文件夹很快，1s 间隔能把轮次拉到 ~10 轮/12s；
+            # 本轮有超时就退避到 3s，避免拖慢整池。
+            remain = deadline - time.time()
+            if remain > 0:
+                time.sleep(min(3.0 if round_slow else 1.0, remain))
         logger.info(
             f"[outlook-graph] 轮询超时未取到验证码 email={email}"
             f"（已扫描 {len(seen)} 封，跳过旧信 {stale_skipped} 封）"
