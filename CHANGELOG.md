@@ -4,6 +4,23 @@
 
 ---
 
+## [1.3] - 2026-11-21
+
+### 修复
+
+**超时占用只在「有人取号」时才回收，池子一闲就永久占库存**
+
+- 现象：`recover_abandoned_claims` 只在 `claim_account` 里顺带调用。生产实测 49 个 `using`
+  里 38 个早过了 15 分钟租约仍在占用 —— 每个项目的库存都被白扣 38 个。
+- 现在：`main.py` 加独立定时任务 `_reclaim_expired_claims_job`（`CronTrigger(minute="*")`，
+  每分钟一次，不依赖配置窗口、也不依赖有没有人取号），回收时打日志
+  `超时占用回收: N 个号回池（租约 15 分钟）`。
+- `claim_account` 里的那次顺带调用保留（双保险，回收逻辑本身幂等）。
+- 测试：`tests/api/test_claim_recovery.py` 4 例（只收超租约的 / 旧 status 同步 /
+  定时任务能独立回收 / 回收后其他项目库存可见）。
+
+---
+
 ## [Unreleased]
 
 ### 变更

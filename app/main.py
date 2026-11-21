@@ -109,6 +109,28 @@ def on_startup() -> None:
     _start_heartbeat_scheduler()
 
 
+def _reclaim_expired_claims_job() -> None:
+    """回收租约到期的占用号（using → available）。
+
+    为什么要有独立定时任务：`claim_account` 里也会顺带调 recovery，但那只在
+    「有新取号」时触发。池子一没人取号，挂住的 using 就一直占着库存 ——
+    每个项目的库存都被白扣（实测 49 个 using 里 38 个早该回收）。
+    """
+    from .database import SessionLocal
+    from .services import pool_service
+
+    db = SessionLocal()
+    try:
+        result = pool_service.recover_abandoned_claims(db)
+        if result["recovered"]:
+            lease = int(pool_service.CLAIM_LEASE_TIMEOUT.total_seconds() // 60)
+            logger.info("超时占用回收: %d 个号回池（租约 %d 分钟）", result["recovered"], lease)
+    except Exception as e:
+        logger.error("超时占用回收任务异常: %s", e)
+    finally:
+        db.close()
+
+
 def _start_heartbeat_scheduler() -> None:
     """启动心跳保活定时任务（如果已启用）。"""
     try:
@@ -239,8 +261,12 @@ def _start_heartbeat_scheduler() -> None:
     scheduler.add_job(_refresh_token_job, CronTrigger(minute="*/5"))
     # 超时释放：每分钟跑一次（不依赖配置窗口）
     scheduler.add_job(_release_expired_job, CronTrigger(minute="*"))
+    # 超时占用回收：每分钟跑一次（不依赖配置窗口，也不依赖有没有人取号）
+    scheduler.add_job(_reclaim_expired_claims_job, CronTrigger(minute="*"))
     scheduler.start()
-    logger.info("调度器已启动（心跳保活 + 健康扫描 + 定时刷新 + 超时释放，每 5 分钟检查配置）")
+    logger.info(
+        "调度器已启动（心跳保活 + 健康扫描 + 定时刷新 + 超时释放 + 超时占用回收，每 5 分钟检查配置）"
+    )
 
 
 @app.get("/api")
