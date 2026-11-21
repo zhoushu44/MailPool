@@ -41,6 +41,17 @@ def _normalize_text(value: str) -> str:
     return re.sub(r"[０-９]", lambda m: chr(ord(m.group(0)) - 0xFEE0), text)
 
 
+# 邮件正文里的常见英文词：被关键词正则误抓成验证码的元凶。
+# （纯字母已在 add_alnum 里直接拒绝；这张表是第二道闸，挡 "Zai2024" 这类
+#   带数字但不是验证码的噪声。）
+_CODE_STOP_WORDS = frozenset({
+    "hello", "hi", "dear", "thanks", "thank", "welcome", "please",
+    "verify", "verification", "email", "account", "click", "button",
+    "below", "here", "team", "support", "help", "code", "passcode",
+    "valid", "expire", "expires", "minutes", "hours", "zai", "zai2",
+})
+
+
 def extract_code(text: str) -> str:
     """从邮件文本中提取验证码。数字优先（6 位加权），兼顾字母数字混合。
 
@@ -58,6 +69,15 @@ def extract_code(text: str) -> str:
     def add_alnum(raw: str, score: int = 0) -> None:
         code = re.sub(r"\s+", "", str(raw or ""))
         if not code or len(code) < 4 or len(code) > 10:
+            return
+        # 验证码必然含数字。纯字母（Hello / Please / Thanks / Verification…）
+        # 绝不可能是验证码，但会被关键词正则抓到 —— 线上实测：
+        #   "Email Verification\r\n\r\nHello zphp5wws1k5,..."
+        #   → 'verification' + 空白 + 'Hello' → 被当成验证码返回
+        # 所有「点链接验证」型邮件（z.ai / AWS / Meta / GitHub）都会中招。
+        if not any(ch.isdigit() for ch in code):
+            return
+        if code.lower() in _CODE_STOP_WORDS:
             return
         candidates.append((code, score))
 

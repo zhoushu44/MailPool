@@ -81,3 +81,12 @@ _fix_proxy.py
 # ---------------------------------------------------------------------------
 tools/*.json
 tools/device_*.json
+
+# 凭据（.secrets/ 不放行）
+.secrets/
+secrets/
+*.secret
+known_hosts
+id_rsa*
+id_ed25519*
+docs/deployment-local.md

@@ -221,6 +221,11 @@ def receive_code(
     """轮询等待验证码。
 
     返回 {"email", "code", "status": "success"|"timeout", "message", "mails": [...]}
+
+    mails 是命中的原始邮件数组（成功时 1 条，超时为空数组），字段：
+      id / message_id / subject / body / body_preview / from / sender / folder / received_at
+    对「点击链接验证」型站点（z.ai 等），code 可能为空字符串，
+    调用方应从 mails[0]["body"] 里自行提取链接。
     """
     project = get_project(db, project_code)
     if not project:
@@ -288,14 +293,40 @@ def receive_code(
             code_source=str(mail.get("code_source") or ""),
             received_at=mail.get("received_at"),
         )
-        return {"email": email, "code": code, "status": "success",
-                "elapsed": round(time.time() - start, 2),
-                "received_at": utc_iso(mail.get("received_at"))}
+        # mails 字段：把原始邮件还给调用方。
+        # 有些站点（z.ai 等）是「点击链接验证」，正文里只有 URL 没有数字码，
+        # 服务端提取不出 code，客户端需要原文自己解析链接。
+        mail_item = {
+            "id": str(mail.get("message_id") or ""),
+            "message_id": str(mail.get("message_id") or ""),
+            "subject": str(mail.get("subject") or ""),
+            "body": str(mail.get("body") or ""),
+            "body_preview": str(mail.get("body_preview") or ""),
+            "from": str(mail.get("sender") or ""),
+            "sender": str(mail.get("sender") or ""),
+            "folder": str(mail.get("folder") or ""),
+            "received_at": utc_iso(mail.get("received_at")),
+        }
+        # status 语义：
+        #   success      拿到验证码（code 非空）
+        #   mail_arrived 邮件到了，但提取不出验证码 —— 典型是「点击链接验证」
+        #                型站点（z.ai 等）。mails[0] 里有完整正文，客户端自己解析。
+        #   timeout      一直没等到新邮件
+        status = "success" if code else "mail_arrived"
+        return {
+            "email": email,
+            "code": code,
+            "status": status,
+            "elapsed": round(time.time() - start, 2),
+            "received_at": utc_iso(mail.get("received_at")),
+            "mails": [mail_item],
+        }
     # 空箱/没等到新信 —— 这是**正常轮询结果**，不是错误。
     # 调用方必须拿到 code=00000 + status=timeout，否则会在"对方还没发信"时中断注册。
     return {"email": email, "code": "", "status": "timeout",
             "elapsed": round(time.time() - start, 2),
-            "message": f"等待 {tmo:.0f}s 未收到验证码"}
+            "message": f"等待 {tmo:.0f}s 未收到验证码",
+            "mails": []}
 
 
 # ────────────────────────────────────────────────────────────────

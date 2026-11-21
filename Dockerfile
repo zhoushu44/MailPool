@@ -30,6 +30,7 @@ RUN apt-get update \
         ca-certificates \
         tzdata \
         curl \
+        gosu \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
@@ -50,15 +51,20 @@ COPY . .
 
 # ---------------------------------------------------------------------------
 # 非 root 用户 + 数据目录
-#   数据目录 /app/data 会被挂载成 volume，UID 1000 需要有写权限：
-#   docker run 时若宿主目录属主不是 1000，请先 chown -R 1000:1000 ./data
+#   容器默认以 root 启动 entrypoint，先把挂载进来的 /app/data 属主修正为
+#   UID 1000，再用 gosu 降权到 mailpool 运行应用。
+#   这样用户 `-v $(pwd)/data:/app/data` 不需要预先 chown，开箱即用。
 # ---------------------------------------------------------------------------
 RUN groupadd --gid 1000 mailpool \
     && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin mailpool \
     && mkdir -p /app/data \
     && chown -R mailpool:mailpool /app
 
-USER mailpool
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 注意：不写 USER mailpool —— entrypoint 需要 root 才能 chown，内部会降权
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 VOLUME ["/app/data"]
 

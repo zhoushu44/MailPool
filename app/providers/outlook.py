@@ -716,20 +716,37 @@ class OutlookEmailProvider(EmailProvider):
                         )
                         continue
                     code = self._extract_graph(msg)
-                    if not code or code in (skip_codes or set()):
+                    if code and code in (skip_codes or set()):
+                        # 命中了调用方要求跳过的码，继续看下一封
                         continue
+
+                    # 提取不到 code 也不能丢：z.ai / Slack / Notion 这类站点是
+                    # 「点击链接验证」，邮件里只有 URL 没有数字码。以前这里
+                    # `if not code: continue` 会把这类邮件直接跳过，客户端等到
+                    # 超时都拿不到正文，也就无法自己解析验证链接。
+                    # 现在：新鲜+未返回过的新邮件一律捕获，code 允许为空，
+                    # 正文照常带回去（客户端自己决定用 code 还是用链接）。
                     _mark_returned(email, mid)
                     sender = ((msg.get("from") or {}).get("emailAddress") or {}).get("address", "")
                     # 列表接口不再带 body（太慢），命中候选后再单独取正文。
-                    # 取不到正文不影响返回验证码——验证码已经从 bodyPreview/主题拿到了。
+                    # 取正文要重试：验证链接只存在于 body 里，取不回来客户端
+                    # 就没法解析。给独立预算（2 次 × 15s），不占用等待窗口。
                     body = ""
-                    try:
-                        full = _call_with_hard_timeout(
-                            _graph_get_message_rest, 6, access_token, mid)
-                        body = ((full or {}).get("body") or {}).get("content", "") or ""
-                    except Exception as exc:
-                        logger.info(f"[outlook-graph] 取正文失败（不影响取码）: {str(exc)[:80]}")
-                    logger.info(f"[outlook-graph] OTP={code} folder={folder} mid={mid[:20]}...")
+                    for attempt in range(2):
+                        try:
+                            full = _call_with_hard_timeout(
+                                _graph_get_message_rest, 15, access_token, mid)
+                            body = ((full or {}).get("body") or {}).get("content", "") or ""
+                            if body:
+                                break
+                        except Exception as exc:
+                            logger.info(
+                                f"[outlook-graph] 取正文第 {attempt + 1}/2 次失败: {str(exc)[:80]}"
+                            )
+                    logger.info(
+                        f"[outlook-graph] 命中邮件 folder={folder} mid={mid[:20]}... "
+                        f"code={code or '(无,仅链接)'} body={len(body)}B"
+                    )
                     return {
                         "code": code,
                         "message_id": mid,
@@ -740,7 +757,7 @@ class OutlookEmailProvider(EmailProvider):
                         "body_preview": str(msg.get("bodyPreview") or ""),
                         "body": str(body or ""),
                         "received_at": recv,
-                        "code_source": "rule",
+                        "code_source": "rule" if code else "none",
                     }
             time.sleep(8 if round_slow else 4)
         logger.info(
@@ -893,28 +910,34 @@ class OutlookEmailProvider(EmailProvider):
                                 f"date={mail_date} baseline_at={self._baseline_at}"
                             )
                             continue
-                        if code and code not in (skip_codes or set()):
-                            _mark_returned(email, mid_str)
-                            logger.info(f"[outlook-imap] 命中邮件 folder={folder!r}")
-                            sender = str(msg.get("From") or "")
-                            subject = str(msg.get("Subject") or "")
-                            body = _raw_to_text(raw[0][1])
-                            try:
-                                M.logout()
-                            except Exception:
-                                pass
-                            return {
-                                "code": code,
-                                "message_id": mid_str,
-                                "provider": "outlook",
-                                "folder": folder,
-                                "sender": sender,
-                                "subject": subject,
-                                "body_preview": body[:500],
-                                "body": body,
-                                "received_at": mail_date,
-                                "code_source": "rule",
-                            }
+                        # 提取不到 code 也要返回：链接验证型邮件（z.ai 等）
+                        # 正文里只有 URL，客户端需要原文自己解析。
+                        if code and code in (skip_codes or set()):
+                            continue
+                        _mark_returned(email, mid_str)
+                        logger.info(
+                            f"[outlook-imap] 命中邮件 folder={folder!r} "
+                            f"code={code or '(无,仅链接)'}"
+                        )
+                        sender = str(msg.get("From") or "")
+                        subject = str(msg.get("Subject") or "")
+                        body = _raw_to_text(raw[0][1])
+                        try:
+                            M.logout()
+                        except Exception:
+                            pass
+                        return {
+                            "code": code,
+                            "message_id": mid_str,
+                            "provider": "outlook",
+                            "folder": folder,
+                            "sender": sender,
+                            "subject": subject,
+                            "body_preview": body[:500],
+                            "body": body,
+                            "received_at": mail_date,
+                            "code_source": "rule" if code else "none",
+                        }
                 try:
                     M.logout()
                 except Exception:
