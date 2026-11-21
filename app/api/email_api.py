@@ -366,16 +366,22 @@ def query_mails(
 
     数据边界：
       - 管理员（会话 / X-Admin-Password 头 / 未设口令的本机）→ 全量
-      - 绑定用户的 API Key 或网页客户会话 → 只能看自己订单里的邮箱
-      - 匿名 key（settings 里的老 key，未绑定用户）→ 全量
-        （老 key 是运营方自用的服务端凭据，语义等同管理员；
-         真正需要隔离的是"客户"身份，即绑了 user_id 的 key）
+      - 匿名 key（settings 里的老 key 或未绑用户的 key）→ 全量
+        （运营方自用的服务端凭据，语义等同管理员）
+      - 绑定用户的 API Key / 网页客户会话 → 计费开启时只能看自己订单的邮箱；
+        **计费关闭时放行全量** —— 那时 email_orders 根本不建单（取号是免费的，
+        没有归属数据可查），继续按订单收窄会把运营方自己的 key 也误判成无权限，
+        导致 /api/v1/mails 恒返回 0 条（线上踩过：zcode 的 wait_link 永远拿不到邮件）。
     """
     from .auth import check_admin_access
 
     scope_emails: set[str] | None = None  # None = 不限制
-    if not check_admin_access(request) and user is not None:
-        # 只有「明确的客户身份」才收窄，匿名 key 保持全量（兼容老集成）
+    if (
+        not check_admin_access(request)
+        and user is not None
+        and billing_service.is_billing_enabled(db)
+    ):
+        # 只有「计费开启 + 明确的客户身份」才收窄
         scope_emails = set(
             db.scalars(select(EmailOrder.email).where(EmailOrder.user_id == user.id))
         )
