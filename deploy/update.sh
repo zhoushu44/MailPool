@@ -22,7 +22,9 @@ TAG="${1:-${TAG:-1.0}}"
 CONTAINER="${CONTAINER:-mailpool}"
 HOST_PORT="${HOST_PORT:-18090}"
 DATA_DIR="${DATA_DIR:-/opt/mailpool/data}"
-ADMIN_PASSWORD="${MAILPOOL_ADMIN_PASSWORD:-<ADMIN_PASSWORD>}"
+# 管理口令必须由环境变量提供，不要再往仓库里写默认值：
+#   export MAILPOOL_ADMIN_PASSWORD='<你的口令>'
+ADMIN_PASSWORD="${MAILPOOL_ADMIN_PASSWORD:?请先设置环境变量 MAILPOOL_ADMIN_PASSWORD}"
 BACKUP_KEEP="${BACKUP_KEEP:-7}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
