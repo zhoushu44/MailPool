@@ -473,6 +473,52 @@ def used_by_other_project(db: Session, email: str, project_code: str) -> bool:
     ) is not None
 
 
+def _probe_account(acc: "EmailAccount") -> tuple[bool, str]:
+    """取号前的实时凭据预检：刷新一次 token，判断号还活着没。
+
+    返回 (alive, reason)。网络抖动等临时错误视为 alive=True
+    （不放死号进池，但也不因为一次网络问题就误杀号）。
+
+    只对 outlook（OAuth 号池）生效：其它 provider 的账号格式不同，
+    强行按 OAuth 解析会全部误判为死号。
+    """
+    import json as _json
+
+    if (acc.provider or "").lower() != "outlook":
+        return True, ""
+
+    try:
+        cred = _json.loads(acc.account_json or "{}")
+    except (_json.JSONDecodeError, TypeError):
+        return False, "credential_invalid: account_json 解析失败"
+    client_id = (cred.get("client_id") or "").strip()
+    refresh_token = (cred.get("refresh_token") or "").strip()
+    if not client_id or not refresh_token:
+        return False, "credential_invalid: 缺 client_id 或 refresh_token"
+    if acc.proxy:
+        cred["proxy"] = acc.proxy
+
+    try:
+        from ..providers.outlook import GRAPH_SCOPE, _refresh_token_for
+
+        cred["email"] = acc.email
+        _refresh_token_for(cred, GRAPH_SCOPE, email=acc.email)
+        # 轮换出的新 rt 需要落库
+        if cred.get("refresh_token") and cred["refresh_token"] != refresh_token:
+            acc.account_json = _json.dumps(cred, ensure_ascii=False)
+        return True, ""
+    except Exception as exc:
+        msg = str(exc)
+        low = msg.lower()
+        if "service abuse" in low or "aadsts70000" in low:
+            return False, "risk_control: service abuse mode"
+        if "invalid_grant" in low or "invalid_client" in low:
+            return False, f"credential_invalid: {msg[:100]}"
+        # 429/超时/连接类 → 不判死
+        logger.info(f"[claim] 预检遇到临时错误，放行 email={acc.email} err={msg[:80]}")
+        return True, ""
+
+
 def claim_account(db: Session, provider: str, project_code: str = "") -> dict[str, Any] | None:
     """从号池 claim 一个 available 账号，标记 using。返回凭证 dict。
 
@@ -492,23 +538,55 @@ def claim_account(db: Session, provider: str, project_code: str = "") -> dict[st
             EmailAccount.health_status.in_(CLAIMABLE_HEALTH_STATUSES),
             EmailAccount.email.not_in(taken),
         )
-        .order_by(EmailAccount.id.asc())
+        # 优先发最近验证过健康的号：last_check_at 越新越靠前，
+        # 避免 id 升序导致老号（更容易被微软盯上）一直排在最前面。
+        .order_by(
+            EmailAccount.last_check_at.desc().nulls_last(),
+            EmailAccount.id.asc(),
+        )
         .limit(50)
     )
-    for acc in db.scalars(stmt):
-        # 原子 claim：仅当账号仍是 available 时才置为 using，
-        # 靠 SQLite 写锁保证并发下不会重复取走同一账号（防止丢失更新）
-        res = db.execute(
-            update(EmailAccount)
-            .where(EmailAccount.id == acc.id, EmailAccount.pool_status == "available")
-            .values(pool_status="using", status="using", claimed_at=_now())
-        )
-        db.commit()
-        if res.rowcount == 1:
-            logger.info(f"[claim] ✓ 取号成功 email={acc.email} account_id={acc.id}")
-            return {"email": acc.email, "account_id": acc.id}
-        else:
+    # 微软会静默把号打成 service abuse mode（token 全废但账号还在），
+    # 而健康扫描按天轮转覆盖不到全池。所以取号时**实时验一次 token**：
+    # 死号当场标记并跳过，绝不把读不了信的号发给客户。
+    # 每轮最多验 8 个（控制延迟），整轮都死了就换下一批候选，最多 5 轮。
+    PROBE_PER_ROUND = 8
+    MAX_ROUNDS = 5
+    for _round in range(MAX_ROUNDS):
+        candidates = list(db.scalars(stmt.limit(PROBE_PER_ROUND)))
+        if not candidates:
+            break
+        retired_this_round = 0
+        for acc in candidates:
+            alive, reason = _probe_account(acc)
+            if not alive:
+                logger.warning(
+                    f"[claim] 预检失败，标记死号并跳过 email={acc.email} reason={reason[:80]}"
+                )
+                acc.pool_status = "retired"
+                acc.health_status = "dead"
+                acc.health_reason = reason[:120]
+                acc.last_check_at = _now()
+                _sync_legacy_status(acc)
+                db.commit()
+                retired_this_round += 1
+                continue
+            acc.last_check_at = _now()
+            # 原子 claim：仅当账号仍是 available 时才置为 using，
+            # 靠 SQLite 写锁保证并发下不会重复取走同一账号（防止丢失更新）
+            res = db.execute(
+                update(EmailAccount)
+                .where(EmailAccount.id == acc.id, EmailAccount.pool_status == "available")
+                .values(pool_status="using", status="using", claimed_at=_now())
+            )
+            db.commit()
+            if res.rowcount == 1:
+                logger.info(f"[claim] ✓ 取号成功 email={acc.email} account_id={acc.id}")
+                return {"email": acc.email, "account_id": acc.id}
             logger.info(f"[claim] 竞态失败 email={acc.email}（已被其他线程取走），继续尝试下一个")
+        if retired_this_round == 0:
+            # 这轮没有死号被清理，说明候选都活着但都被抢走了 → 无号可发
+            break
     logger.info(f"[claim] ✗ 无可用号 provider={provider}")
     return None
 
@@ -935,7 +1013,9 @@ def check_accounts_health(
     返回 {total, checked, healthy, unhealthy, skipped, paused, details: [...]}
     """
     logger.info(f"[health-scan] 开始扫描 provider={provider} limit={limit} force={force}")
-    # 取所有 available / healthy / unhealthy 状态的账号（不含 using/dead）
+    # 取所有 available / healthy / unhealthy 状态的账号（不含 using/dead）。
+    # 排序：最久没检测的优先（last_check_at 升序，NULL 最先），
+    # 保证每个号都能被轮到，而不是永远只扫 id 最小的那批。
     stmt = (
         select(EmailAccount)
         .where(
@@ -943,8 +1023,13 @@ def check_accounts_health(
             EmailAccount.pool_status == "available",
             EmailAccount.health_status.in_(["unknown", "healthy", "unhealthy"]),
         )
-        .order_by(EmailAccount.id.asc())
-        .limit(limit * 2 if not force else limit)
+        .order_by(
+            EmailAccount.last_check_at.asc().nulls_first(),
+            EmailAccount.id.asc(),
+        )
+        # 候选窗口放大：7 天缓存会跳过大量刚检过的号，
+        # 太小会导致 limit 填不满（970 个号永远只扫前 100 个）。
+        .limit(limit * 4 if not force else limit)
     )
     accounts = list(db.scalars(stmt))
 

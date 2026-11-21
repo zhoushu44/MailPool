@@ -190,7 +190,9 @@ def set_heartbeat_last_run(db: Session, summary: dict[str, Any]) -> None:
 # ────────────────────────────────────────────────────────────────
 
 HEALTH_CHECK_DEFAULTS = {
-    "health_check_enabled": "false",
+    # 默认开启：微软会静默把号打成 service abuse mode（token 全废），
+    # 关掉健康扫描等于让死号一直躺在池子里发给客户。
+    "health_check_enabled": "true",
     "health_check_hour": "8",
     "health_check_minute": "0",
 }

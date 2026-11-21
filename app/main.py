@@ -142,7 +142,10 @@ def _start_heartbeat_scheduler() -> None:
             if not _in_window(now, hour, minute):
                 return
             logger.info("心跳保活定时任务启动: mode=%s", mode)
-            result = pool_service.heartbeat(db, mode=mode, limit=50)
+            # 970 个号池按 limit=50 一天只能轮 50 个 = 20 天一圈，
+            # 微软封号根本追不上。改成每次「未验证最久的先验」，
+            # limit 提到 300（约 5 万次 token 刷新/月的量级，微软限流可控）。
+            result = pool_service.heartbeat(db, mode=mode, limit=300)
             settings_service.set_heartbeat_last_run(db, {
                 "total": result["total"],
                 "success": result["success"],
@@ -170,7 +173,7 @@ def _start_heartbeat_scheduler() -> None:
             if not _in_window(now, hour, minute):
                 return
             logger.info("健康扫描定时任务启动")
-            result = pool_service.check_accounts_health(db, "outlook", limit=50, force=False)
+            result = pool_service.check_accounts_health(db, "outlook", limit=300, force=False)
             settings_service.set_health_check_last_run(db, {
                 "total": result["total"],
                 "checked": result["checked"],
