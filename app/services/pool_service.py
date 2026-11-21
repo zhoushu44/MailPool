@@ -575,21 +575,38 @@ def claim_account(db: Session, provider: str, project_code: str = "") -> dict[st
                 # 已被别的线程/进程抢走 → 不浪费一次 token 刷新，直接看下一个
                 continue
 
-            # 占位成功，这个号归我了，只需要验这一次
-            db.refresh(acc)  # 让 ORM 对象跟上刚才那条 UPDATE（pool_status=using）
+            # 占位成功，这个号归我了，只需要验这一次。
+            #
+            # 关键：预检是一次**网络调用**（刷新 token，几秒级）。这里必须先
+            # 把 ORM 对象从 session 上摘下来（expunge），否则 refresh/懒加载
+            # 会在预检期间一直占着一条池连接 —— 50 并发时 5+10 的连接池被
+            # 占满，其余请求等 30 秒后抛
+            # `QueuePool limit of size 5 overflow 10 reached` → HTTP 500。
+            # commit 本身已把连接还池，所以摘掉之后预检期间不占连接。
+            db.expunge(acc)
             alive, reason = _probe_account(acc)
             if not alive:
                 logger.warning(
                     f"[claim] 预检失败，标记死号并跳过 email={acc.email} reason={reason[:80]}"
                 )
-                acc.pool_status = "retired"
-                acc.health_status = "dead"
-                acc.health_reason = reason[:120]
-                acc.last_check_at = _now()
-                _sync_legacy_status(acc)
+                db.execute(
+                    update(EmailAccount)
+                    .where(EmailAccount.id == acc.id)
+                    .values(
+                        pool_status="retired",
+                        status="retired",
+                        health_status="dead",
+                        health_reason=reason[:120],
+                        last_check_at=_now(),
+                    )
+                )
                 db.commit()
                 continue
-            acc.last_check_at = _now()
+            # 预检可能轮换出新的 refresh_token，必须落库（否则下次刷新用旧 rt 会失效）
+            values: dict[str, Any] = {"last_check_at": _now()}
+            if acc.account_json:
+                values["account_json"] = acc.account_json
+            db.execute(update(EmailAccount).where(EmailAccount.id == acc.id).values(**values))
             db.commit()
             logger.info(f"[claim] ✓ 取号成功 email={acc.email} account_id={acc.id}")
             return {"email": acc.email, "account_id": acc.id}
@@ -890,6 +907,9 @@ def snapshot_mail_baseline(db: Session, email: str, project_code: str = "") -> d
         if cred and cred.get("refresh_token") and cred.get("client_id"):
             from ..providers.outlook import GRAPH_FOLDERS, _graph_list_messages, _request_access_token
 
+            # 先结束当前事务把连接还池：下面是一次网络调用（Graph 拉全文件夹），
+            # 拿着连接做网络 I/O 会在并发取号时把 pool_size 耗干（见 claim_account）。
+            db.commit()
             data = _request_access_token(
                 cred["refresh_token"], cred["client_id"], "https://graph.microsoft.com/.default",
                 proxy=cred.get("proxy") or None,

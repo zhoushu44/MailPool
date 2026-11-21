@@ -22,7 +22,18 @@ def build_engine(db_path: str | Path | None = None):
     path = db_path or DB_PATH
     engine = create_engine(
         f"sqlite:///{path}",
+        # timeout=30 → sqlite3 的 busy timeout（写锁等待），配合下面的 PRAGMA
         connect_args={"check_same_thread": False, "timeout": 30},
+        # SQLAlchemy 连接池：默认 pool_size=5 + max_overflow=10 = 15 条。
+        # 取号/收码都是同步阻塞路由（跑在线程池里，默认 40 线程），
+        # 50 并发时 15 条连接不够用 → 等 30 秒后抛
+        # `QueuePool limit of size 5 overflow 10 reached` → HTTP 500。
+        # SQLite + WAL 的读并发很好（写有 busy_timeout 排队），放宽即可。
+        pool_size=20,
+        max_overflow=40,
+        pool_timeout=30,
+        pool_recycle=1800,
+        pool_pre_ping=True,
     )
 
     @event.listens_for(engine, "connect")

@@ -25,6 +25,24 @@
   稳定复现 7/20 误报 `no_stock`。
 - 实测（生产镜像，828 库存池）：修复前并发 20 → 8/20，修复后同条件 20/20。
 
+**第二个瓶颈：并发 50 时连接池耗尽（HTTP 500）**
+
+- 现象：修完上面的竞态后并发 20 已 20/20，但 **并发 50 → 29/50**，
+  失败全是 `HTTP 500`，而且每个请求都卡满 75s/110s。
+- 根因：SQLAlchemy 默认 `pool_size=5 + max_overflow=10 = 15` 条连接。
+  取号是同步阻塞路由（跑在线程池里），`claim_account` 在**持着连接做网络调用**
+  （刷新 token、抓收件箱基线），50 并发时连接被占满，其余请求等 30 秒后抛
+  `QueuePool limit of size 5 overflow 10 reached`。
+- 修复：
+  - `claim_account` 预检前 `db.expunge(acc)`，让 commit 先把连接还池；
+    预检结果改用 `UPDATE` 写回（顺带修了一个**真 bug**：预检轮换出的
+    新 `refresh_token` 原来根本没落库）。
+  - `snapshot_mail_baseline` 在 Graph 网络调用前 `db.commit()` 还连接。
+  - 连接池放宽到 `pool_size=20 / max_overflow=40 / pool_timeout=30`，
+    加 `pool_recycle=1800` + `pool_pre_ping`（SQLite+WAL 读并发足够）。
+- 实测（1.4.1 生产镜像）：并发 50 → **50/50（11.8s）**，
+  并发 80 → **80/80（12.9s）**。修复前同条件 29/50（112s）。
+
 **`database.py` 的 SQLite `busy_timeout` 修复未入库**
 
 - 线上升级过的镜像里有 `connect_args timeout=30` + `PRAGMA busy_timeout=30000`
