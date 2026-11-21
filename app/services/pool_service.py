@@ -549,15 +549,34 @@ def claim_account(db: Session, provider: str, project_code: str = "") -> dict[st
     # 微软会静默把号打成 service abuse mode（token 全废但账号还在），
     # 而健康扫描按天轮转覆盖不到全池。所以取号时**实时验一次 token**：
     # 死号当场标记并跳过，绝不把读不了信的号发给客户。
-    # 每轮最多验 8 个（控制延迟），整轮都死了就换下一批候选，最多 5 轮。
+    #
+    # 顺序很关键：**先原子占位，再验号**。
+    # 反过来（先验再占）在并发下会退化成「N 个线程一起验同一批候选、
+    # 只有一个抢得到」：白烧 N 倍 token 刷新，抢输的线程若就此放弃，
+    # 库存充足也会误报 D0002。实测（828 库存的池子）：
+    #   串行 12 → 12/12；并发 5 → 5/5；并发 9 → 8/9；并发 10 → 8/10；
+    #   并发 20 → 8/20。上限恰好是 PROBE_PER_ROUND(8)，不是库存。
     PROBE_PER_ROUND = 8
-    MAX_ROUNDS = 5
+    MAX_ROUNDS = 20
     for _round in range(MAX_ROUNDS):
         candidates = list(db.scalars(stmt.limit(PROBE_PER_ROUND)))
         if not candidates:
             break
-        retired_this_round = 0
         for acc in candidates:
+            # 原子占位：仅当账号仍是 available 时才置为 using，
+            # 靠 SQLite 写锁保证并发下不会重复取走同一账号（防止丢失更新）。
+            res = db.execute(
+                update(EmailAccount)
+                .where(EmailAccount.id == acc.id, EmailAccount.pool_status == "available")
+                .values(pool_status="using", status="using", claimed_at=_now())
+            )
+            db.commit()
+            if res.rowcount != 1:
+                # 已被别的线程/进程抢走 → 不浪费一次 token 刷新，直接看下一个
+                continue
+
+            # 占位成功，这个号归我了，只需要验这一次
+            db.refresh(acc)  # 让 ORM 对象跟上刚才那条 UPDATE（pool_status=using）
             alive, reason = _probe_account(acc)
             if not alive:
                 logger.warning(
@@ -569,25 +588,12 @@ def claim_account(db: Session, provider: str, project_code: str = "") -> dict[st
                 acc.last_check_at = _now()
                 _sync_legacy_status(acc)
                 db.commit()
-                retired_this_round += 1
                 continue
             acc.last_check_at = _now()
-            # 原子 claim：仅当账号仍是 available 时才置为 using，
-            # 靠 SQLite 写锁保证并发下不会重复取走同一账号（防止丢失更新）
-            res = db.execute(
-                update(EmailAccount)
-                .where(EmailAccount.id == acc.id, EmailAccount.pool_status == "available")
-                .values(pool_status="using", status="using", claimed_at=_now())
-            )
             db.commit()
-            if res.rowcount == 1:
-                logger.info(f"[claim] ✓ 取号成功 email={acc.email} account_id={acc.id}")
-                return {"email": acc.email, "account_id": acc.id}
-            logger.info(f"[claim] 竞态失败 email={acc.email}（已被其他线程取走），继续尝试下一个")
-        if retired_this_round == 0:
-            # 这轮没有死号被清理，说明候选都活着但都被抢走了 → 无号可发
-            break
-    logger.info(f"[claim] ✗ 无可用号 provider={provider}")
+            logger.info(f"[claim] ✓ 取号成功 email={acc.email} account_id={acc.id}")
+            return {"email": acc.email, "account_id": acc.id}
+    logger.info(f"[claim] ✗ 无可用号 provider={provider}（已扫 {MAX_ROUNDS} 轮候选）")
     return None
 
 

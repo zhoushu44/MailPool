@@ -22,7 +22,7 @@ def build_engine(db_path: str | Path | None = None):
     path = db_path or DB_PATH
     engine = create_engine(
         f"sqlite:///{path}",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 30},
     )
 
     @event.listens_for(engine, "connect")
@@ -35,6 +35,7 @@ def build_engine(db_path: str | Path | None = None):
                 cursor.execute("PRAGMA journal_mode=MEMORY")
             except Exception:
                 pass
+        cursor.execute("PRAGMA busy_timeout=30000")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
