@@ -17,7 +17,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # 配置（可用环境变量覆盖）
 # ---------------------------------------------------------------------------
-IMAGE="${IMAGE:-zhoushu44/mailpool}"
+IMAGE="${IMAGE:-zhoushu1/mailpool}"
 TAG="${1:-${TAG:-1.0}}"
 CONTAINER="${CONTAINER:-mailpool}"
 HOST_PORT="${HOST_PORT:-18090}"
