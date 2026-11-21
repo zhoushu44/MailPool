@@ -449,10 +449,18 @@ def _extract_otp_from_html(body: str) -> Optional[str]:
 
 
 def _graph_list_messages(access_token: str, folder: str, timeout: float = 15) -> list:
+    """列一个文件夹的最近邮件。
+
+    性能要点（线上 604 秒事故）：
+      1. **不拉 body**：`$select=body` 会让 Graph 为每封邮件渲染完整 HTML
+         （单封可达数百 KB），15 封就是几 MB，公网慢链路要几百秒。
+         这里只取判断所需的轻量字段，命中候选后再单独取正文。
+      2. **不加 $orderby**：Graph 对 `receivedDateTime DESC` + 大 $select
+         组合会走低效排序计划。默认顺序（最新在前）足够。
+    """
     params = urllib.parse.urlencode({
         "$top": "15",
-        "$orderby": "receivedDateTime DESC",
-        "$select": "id,subject,bodyPreview,body,receivedDateTime,from,toRecipients",
+        "$select": "id,subject,bodyPreview,receivedDateTime,from,toRecipients",
     })
     url = f"{GRAPH_BASE}/me/mailFolders/{folder}/messages?{params}"
     req = urllib.request.Request(url, headers={
@@ -463,6 +471,48 @@ def _graph_list_messages(access_token: str, folder: str, timeout: float = 15) ->
     data = json.loads(resp.read())
     value = data.get("value") or []
     return value if isinstance(value, list) else []
+
+
+def _call_with_hard_timeout(fn, seconds: float, *args, **kwargs):
+    """给阻塞调用套一个**硬性墙钟超时**。
+
+    urllib 的 timeout 只管 socket 单次读写：服务器握手后就慢慢滴数据时，
+    一次请求可以挂几分钟（线上实测单次 Graph 查信 604 秒）。收码窗口只有
+    180 秒，必须能主动放弃这种请求。
+
+    用守护线程执行 + join(seconds)：超时就把结果丢掉返回 None，
+    后台线程自行结束（daemon，不阻塞进程退出）。
+    """
+    import threading as _threading
+
+    box: dict = {}
+
+    def runner():
+        try:
+            box["value"] = fn(*args, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 传回调用方处理
+            box["error"] = exc
+
+    t = _threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        raise TimeoutError(f"调用超过 {seconds:.0f}s 未返回（已放弃）")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
+def _graph_get_message_rest(access_token: str, message_id: str, timeout: float = 10) -> dict:
+    """按 id 取单封邮件正文（已持有 access_token 时用）。"""
+    safe_id = urllib.parse.quote(message_id, safe="")
+    params = urllib.parse.urlencode({"$select": "id,subject,body,bodyPreview,receivedDateTime,from,toRecipients"})
+    req = urllib.request.Request(
+        f"{GRAPH_BASE}/me/messages/{safe_id}?{params}",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
 
 
 def graph_list_messages(cred: dict[str, Any], folder: str = "inbox", top: int = 20) -> list[dict[str, Any]]:
@@ -617,9 +667,15 @@ class OutlookEmailProvider(EmailProvider):
             f"基线={len(baseline)}封 baseline_at={baseline_at}"
         )
         while time.time() < deadline:
+            round_slow = False
             for folder in GRAPH_FOLDERS:
+                if time.time() >= deadline:
+                    break
                 try:
-                    messages = _graph_list_messages(access_token, folder)
+                    # 单文件夹硬上限 8 秒：3 个文件夹一轮最多 24 秒，
+                    # 保证在 180 秒收码窗口内还能轮好几遍。
+                    messages = _call_with_hard_timeout(
+                        _graph_list_messages, 8, access_token, folder)
                 except urllib.error.HTTPError as e:
                     if e.code == 401:
                         logger.info(f"[outlook-graph] 401 token 过期，重新刷新（folder={folder}）")
@@ -630,6 +686,10 @@ class OutlookEmailProvider(EmailProvider):
                         logger.info(f"[outlook-graph] HTTP {e.code} folder={folder}，跳过")
                         continue
                     raise
+                except TimeoutError:
+                    round_slow = True
+                    logger.warning(f"[outlook-graph] folder={folder} 查询超 8s 已放弃，本轮降速")
+                    continue
                 except Exception:
                     continue
                 for msg in messages:
@@ -660,7 +720,15 @@ class OutlookEmailProvider(EmailProvider):
                         continue
                     _mark_returned(email, mid)
                     sender = ((msg.get("from") or {}).get("emailAddress") or {}).get("address", "")
-                    body = (msg.get("body") or {}).get("content", "")
+                    # 列表接口不再带 body（太慢），命中候选后再单独取正文。
+                    # 取不到正文不影响返回验证码——验证码已经从 bodyPreview/主题拿到了。
+                    body = ""
+                    try:
+                        full = _call_with_hard_timeout(
+                            _graph_get_message_rest, 6, access_token, mid)
+                        body = ((full or {}).get("body") or {}).get("content", "") or ""
+                    except Exception as exc:
+                        logger.info(f"[outlook-graph] 取正文失败（不影响取码）: {str(exc)[:80]}")
                     logger.info(f"[outlook-graph] OTP={code} folder={folder} mid={mid[:20]}...")
                     return {
                         "code": code,
@@ -674,7 +742,7 @@ class OutlookEmailProvider(EmailProvider):
                         "received_at": recv,
                         "code_source": "rule",
                     }
-            time.sleep(4)
+            time.sleep(8 if round_slow else 4)
         logger.info(
             f"[outlook-graph] 轮询超时未取到验证码 email={email}"
             f"（已扫描 {len(seen)} 封，跳过旧信 {stale_skipped} 封）"
