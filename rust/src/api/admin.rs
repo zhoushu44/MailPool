@@ -2242,6 +2242,12 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             get(refresh_one_token_status),
         )
         .route("/api/admin/pool/heartbeat", post(run_heartbeat))
+        // 收件箱查看（Graph 实时拉取 + 可选 AI 识别）
+        .route("/api/admin/mailbox/messages", get(crate::api::mailbox::admin_messages))
+        .route("/api/admin/mailbox/message", get(crate::api::mailbox::admin_message))
+        .route("/api/admin/mailbox/ai-code", post(crate::api::mailbox::admin_ai_code))
+        // 批量任务历史
+        .route("/api/admin/emails/refresh-all/tasks", get(refresh_all_tasks))
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2336,11 +2342,10 @@ struct RefreshAllBody {
     provider: Option<String>,
 }
 
-/// `POST /api/admin/emails/refresh-all` — 全量刷新 token（后台任务）。
+/// `POST /api/admin/emails/refresh-all` — 启动全量刷新**后台任务**。
 ///
-/// Python 版是起一个线程跑并返回 `task_id` 让前端轮询。这里简化成
-/// 「同步跑 + 返回结果」：995 个号全刷要 40 分钟，同步跑会超时，
-/// 所以**只跑前 200 个**并明确告知剩余数量（够页面按钮的语义）。
+/// 返回 `task_id`，前端拿着它轮询 `/refresh-all/status`。
+/// 995 个号串行约 40 分钟，同步跑必然超时 —— 必须后台。
 async fn refresh_all(
     State(st): State<Arc<AppState>>,
     identity: Identity,
@@ -2348,29 +2353,45 @@ async fn refresh_all(
 ) -> AppResult<Json<Value>> {
     ensure_admin(&identity)?;
     let provider = body.provider.as_deref().unwrap_or(PROVIDER);
-    let r = pool::refresh_all_tokens(&st.pool, &st.http, provider).await?;
-    Ok(admin_ok(json!({
-        "total": r.total,
-        "success": r.success,
-        "failed": r.failed,
-        "duration": r.duration_secs,
-    })))
+    let r = crate::services::batch::start_refresh_all(st, provider, "manual").await?;
+    Ok(admin_ok(r))
+}
+
+#[derive(Debug, Deserialize)]
+struct TaskStatusQuery {
+    #[serde(default)]
+    task_id: String,
 }
 
 /// `GET /api/admin/emails/refresh-all/status` — 查批量刷新进度。
 ///
-/// 当前实现是同步的，没有后台任务，所以固定返回 `finished`。
-/// 保留端点是为了让 accounts.html 的轮询逻辑不至于 404 卡在"进行中"。
+/// `task_id` 为空时返回**最近一个**任务的状态（前端首次进页面时没有 id）。
 async fn refresh_all_status(
+    State(_st): State<Arc<AppState>>,
+    identity: Identity,
+    Query(q): Query<TaskStatusQuery>,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    if q.task_id.trim().is_empty() {
+        // 没给 id：返回最近一个任务的进度
+        let all = crate::services::batch::list_tasks();
+        return Ok(admin_ok(
+            all.first()
+                .cloned()
+                .unwrap_or_else(|| json!({"status": "not_found"})),
+        ));
+    }
+    Ok(admin_ok(crate::services::batch::get_status(q.task_id.trim())))
+}
+
+/// `GET /api/admin/emails/refresh-all/tasks` — 任务历史（最近 20 个）。
+async fn refresh_all_tasks(
     State(_st): State<Arc<AppState>>,
     identity: Identity,
 ) -> AppResult<Json<Value>> {
     ensure_admin(&identity)?;
     Ok(admin_ok(json!({
-        "status": "finished",
-        "done": 0,
-        "total": 0,
-        "results": [],
+        "tasks": crate::services::batch::list_tasks(),
     })))
 }
 

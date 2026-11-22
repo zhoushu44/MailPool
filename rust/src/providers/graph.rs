@@ -97,6 +97,14 @@ impl GraphError {
 }
 
 /// 列某文件夹的邮件（只取需要的字段，减少传输）。
+///
+/// `with_body` 决定是否取正文：
+/// - **列表页不取**（`$select` 里没有 body）—— 正文动辄几十 KB，
+///   20 封就是 1MB+，列表页根本用不到（只显示预览）
+/// - 取码时**要取**（否则提取不到验证码）
+///
+/// 这个差异是从 Python 版对齐来的：它的 `graph_list_messages` 也分两种
+/// `$select`。
 pub async fn list_messages(
     http: &reqwest::Client,
     access_token: &str,
@@ -104,9 +112,26 @@ pub async fn list_messages(
     top: u32,
     since: Option<&str>,
 ) -> Result<Vec<Value>, GraphError> {
+    list_messages_opts(http, access_token, folder, top, since, true).await
+}
+
+/// 带 `with_body` 开关的版本。
+pub async fn list_messages_opts(
+    http: &reqwest::Client,
+    access_token: &str,
+    folder: &str,
+    top: u32,
+    since: Option<&str>,
+    with_body: bool,
+) -> Result<Vec<Value>, GraphError> {
+    let select = if with_body {
+        "id,subject,bodyPreview,receivedDateTime,from,toRecipients,isRead,body"
+    } else {
+        "id,subject,bodyPreview,receivedDateTime,from,toRecipients,isRead"
+    };
     let mut url = format!(
         "{GRAPH_BASE}/me/mailFolders/{folder}/messages?$top={top}\
-         &$select=id,subject,bodyPreview,receivedDateTime,from,body\
+         &$select={select}\
          &$orderby=receivedDateTime desc"
     );
     if let Some(s) = since {

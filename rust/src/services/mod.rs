@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod billing;
 pub mod mail;
 pub mod payment;
