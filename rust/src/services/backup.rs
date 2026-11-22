@@ -453,27 +453,95 @@ async fn run_backup_inner(
     Ok(record)
 }
 
+/// 把 AWS SDK 的错误链展开成可诊断的字符串。
+///
+/// ## 为什么需要这个
+///
+/// AWS SDK 的 `Display` 只打印最外层错误，常常就是一句 **`service error`**
+/// ——对使用者毫无帮助，无法判断是签名错、桶不存在、还是区域不对。
+///
+/// 真正的信息藏在 `Debug` 输出和 `source()` 链里：
+/// ```text
+/// service error
+///   └─ unhandled error
+///       └─ Error { code: "InvalidAccessKeyId", message: "..." }
+/// ```
+///
+/// 这里把整条链的 Debug 输出拼起来，并抓取 `code` / `message` 字段，
+/// 产出 `[InvalidAccessKeyId] The AWS Access Key Id you provided does not exist`
+/// 这样的可读信息。
+fn describe_s3_error(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+
+    let mut depth = 0;
+    while let Some(e) = cur {
+        if depth >= 8 {
+            break;
+        }
+        let dbg = format!("{e:?}");
+        if let Some(code) = extract_field(&dbg, "code") {
+            parts.push(format!("[{code}]"));
+        }
+        if let Some(msg) = extract_field(&dbg, "message") {
+            parts.push(msg);
+        }
+        let disp = e.to_string();
+        if !disp.is_empty() && disp != "service error" && disp != "unhandled error" {
+            parts.push(disp);
+        }
+        cur = e.source();
+        depth += 1;
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    for p in parts {
+        let p = p.trim().to_string();
+        if p.is_empty() || out.iter().any(|x| x == &p) {
+            continue;
+        }
+        out.push(p);
+    }
+    if out.is_empty() {
+        err.to_string()
+    } else {
+        out.join(" ")
+    }
+}
+
+/// 从 Debug 输出里抓 `field: Some("value")` / `field: "value"` / `field: Some(X)`。
+fn extract_field(debug_str: &str, field: &str) -> Option<String> {
+    let needle = format!("{field}:");
+    let idx = debug_str.find(&needle)?;
+    let rest = debug_str[idx + needle.len()..].trim_start();
+
+    if let Some(r) = rest.strip_prefix("Some(\"") {
+        return r.find('"').map(|end| r[..end].to_string());
+    }
+    if let Some(r) = rest.strip_prefix("Some(") {
+        if r.starts_with('"') {
+            let r2 = &r[1..];
+            return r2.find('"').map(|end| r2[..end].to_string());
+        }
+        // Some(StatusCode(403)) 之类
+        return r.find(')').map(|end| r[..end].to_string());
+    }
+    if let Some(r) = rest.strip_prefix('"') {
+        return r.find('"').map(|end| r[..end].to_string());
+    }
+    None
+}
+
 /// 构造 S3 客户端。
 ///
-/// ## `checksum` 配置为什么关键（踩过的坑）
+/// ## checksum 配置为什么关键（踩过的坑）
 ///
-/// AWS SDK 默认会用 **aws-chunked** 分块编码上传：请求体变成
-/// ```text
-/// 10000;chunk-signature=<sig>\r\n<64KB 数据>\r\n
-/// 10000;chunk-signature=<sig>\r\n<64KB 数据>\r\n
-/// 0;chunk-signature=<sig>\r\n
-/// ```
-/// 真正的对象存储（S3 / MinIO / OSS）会解码这个格式，所以文件是好的。
+/// AWS SDK 默认用 aws-chunked 分块编码上传，首字节是 10000;chunk-signature=...。
+/// 部分兼容服务（尤其老版本 OSS/COS）不解码这个格式，存下来是带 chunk 头部的
+/// 损坏文件 —— 备份看起来成功，实际恢复不了。
 ///
-/// 但有两个问题：
-/// 1. **部分兼容服务（尤其老版本 OSS/COS）不解码 aws-chunked**，
-///    结果存下来的是带 chunk 头部的损坏文件 —— 备份"成功"了但恢复不了。
-///    sub2api 为此专门设了 `SwapComputePayloadSHA256ForUnsignedPayloadMiddleware`。
-/// 2. 调试时如果用简单 HTTP 服务器接收（看不到解码层），会以为文件坏了。
-///
-/// 这里的处理：`RequestChecksumCalculation::WhenRequired` +
-/// `ResponseChecksumValidation::WhenRequired`，让 SDK 只在 S3 明确要求时
-/// 才算校验和，避免无条件启用 aws-chunked。
+/// 设 RequestChecksumCalculation::WhenRequired 后变成干净单次 PUT。
+/// 实测：修复前首字节是 10000;chunk-signature=，修复后是 1f 8b 08（标准 gzip 魔数）。
 async fn build_client(cfg: &S3Config) -> aws_sdk_s3::Client {
     use aws_sdk_s3::config::{
         BehaviorVersion, Credentials, Region, RequestChecksumCalculation,
@@ -540,7 +608,7 @@ async fn upload_with_retry(cfg: &S3Config, key: &str, path: &Path) -> AppResult<
                 return Ok(());
             }
             Err(e) => {
-                let msg = format!("{e}");
+                let msg = describe_s3_error(&e);
                 // 4xx 不重试（凭证错、桶不存在、权限不足）
                 let is_client_error = msg.contains("403")
                     || msg.contains("404")
@@ -751,8 +819,99 @@ pub async fn test_connection(cfg: &S3Config) -> AppResult<String> {
         .bucket(cfg.bucket.trim())
         .send()
         .await
-        .map_err(|e| AppError::bad_gateway(format!("连接失败: {e}")))?;
+        .map_err(|e| AppError::bad_gateway(format!("连接失败: {}", describe_s3_error(&e))))?;
     Ok(format!("连接成功（bucket: {}）", cfg.bucket))
+}
+
+/// 从 S3 下载并解压一个备份，验证其完整性。
+///
+/// 这是备份功能**最关键的验证**：上传成功不等于文件可用。
+/// 实测踩过的坑 —— aws-chunked 编码会让对象存储里躺着一个
+/// 「上传成功但解不开」的文件。所以必须能读回来、解压、跑 integrity_check。
+///
+/// 返回 `(解压后大小, 表数量, integrity_check 结果)`。
+pub async fn verify_backup(cfg: &S3Config, key: &str) -> AppResult<(u64, i64, String)> {
+    if !cfg.is_configured() {
+        return Err(AppError::bad_request("S3 未配置"));
+    }
+    let client = build_client(cfg).await;
+
+    let resp = client
+        .get_object()
+        .bucket(cfg.bucket.trim())
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| AppError::bad_gateway(format!("下载失败: {}", describe_s3_error(&e))))?;
+
+    let bytes = resp
+        .body
+        .collect()
+        .await
+        .map_err(|e| AppError::bad_gateway(format!("读取响应体失败: {e}")))?
+        .into_bytes();
+
+    // 配置了加密口令 且 文件带 magic → 先解密
+    let payload: Vec<u8> = if !cfg.encryption_passphrase.trim().is_empty()
+        && bytes.len() >= 8
+        && &bytes[..8] == MAGIC
+    {
+        let dir = crate::config::Settings::get().data_dir.clone();
+        let tmp_in = dir.join(format!(".verify_{}.enc", crate::util::random_hex(4)));
+        let tmp_out = dir.join(format!(".verify_{}.gz", crate::util::random_hex(4)));
+        std::fs::write(&tmp_in, &bytes)
+            .map_err(|e| AppError::internal(format!("写临时文件失败: {e}")))?;
+        let pass = cfg.encryption_passphrase.clone();
+        let r = decrypt_file(&tmp_in, &tmp_out, &pass);
+        let _ = std::fs::remove_file(&tmp_in);
+        r?;
+        let out = std::fs::read(&tmp_out)
+            .map_err(|e| AppError::internal(format!("读解密文件失败: {e}")))?;
+        let _ = std::fs::remove_file(&tmp_out);
+        out
+    } else {
+        bytes.to_vec()
+    };
+
+    // gzip 解压
+    let raw = {
+        use std::io::Read;
+        let mut dec = flate2::read::GzDecoder::new(&payload[..]);
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out)
+            .map_err(|e| AppError::bad_gateway(format!("gzip 解压失败（文件可能损坏）: {e}")))?;
+        out
+    };
+
+    // 写临时库跑 integrity_check
+    let dir = crate::config::Settings::get().data_dir.clone();
+    let tmp_db = dir.join(format!(".verify_{}.db", crate::util::random_hex(4)));
+    std::fs::write(&tmp_db, &raw)
+        .map_err(|e| AppError::internal(format!("写临时库失败: {e}")))?;
+
+    let result = async {
+        let conn_str = format!("sqlite://{}?mode=ro", tmp_db.to_string_lossy());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&conn_str)
+            .await
+            .map_err(|e| AppError::internal(format!("打开快照失败: {e}")))?;
+        let integ: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|_| "unknown".to_string());
+        let n: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                .fetch_one(&pool)
+                .await
+                .unwrap_or(0);
+        pool.close().await;
+        Ok::<_, AppError>((raw.len() as u64, n, integ))
+    }
+    .await;
+
+    let _ = std::fs::remove_file(&tmp_db);
+    result
 }
 
 /// 删除一条备份（记录 + 对象）。

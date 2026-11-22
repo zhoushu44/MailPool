@@ -39,6 +39,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             delete(delete_record),
         )
         .route("/api/admin/backup/status", get(get_status))
+        .route("/api/admin/backup/verify", post(verify_record))
 }
 
 fn ensure_admin(identity: &Identity) -> AppResult<()> {
@@ -168,4 +169,38 @@ async fn get_status(
         "record_count": state.records.len(),
         "latest": state.records.last(),
     })))
+}
+
+/// `POST /api/admin/backup/verify` — 下载并校验一个备份的完整性。
+///
+/// 备份最容易出的问题是「上传成功但内容坏了」，必须能读回来验证。
+#[derive(Debug, Deserialize)]
+struct VerifyBody {
+    id: String,
+}
+
+async fn verify_record(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+    Json(body): Json<VerifyBody>,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let cfg = backup::load_config(&st.pool).await?;
+    let state = backup::load_state();
+    let Some(rec) = state.records.iter().find(|r| r.id == body.id) else {
+        return Ok(api_err(CODE_OP_FAILED, "备份记录不存在"));
+    };
+
+    let key = rec.key.clone();
+    match backup::verify_backup(&cfg, &key).await {
+        Ok((size, tables, integ)) => Ok(ok(json!({
+            "id": body.id,
+            "key": key,
+            "decompressed_size": size,
+            "table_count": tables,
+            "integrity_check": integ,
+            "ok": integ == "ok",
+        }))),
+        Err(e) => Ok(api_err(CODE_OP_FAILED, format!("校验失败: {e}"))),
+    }
 }
