@@ -377,6 +377,7 @@ def _request_access_token(refresh_token: str, client_id: str, scope: str, proxy:
                 data = json.loads(resp.read())
                 if data.get("access_token"):
                     logger.info(f"[token] ✓ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 刷新成功")
+                    _rate_feedback("token", client_id, "ok")
                     return data
                 last_error = f"no access_token from {endpoint}"
                 logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 返回无 access_token")
@@ -390,6 +391,7 @@ def _request_access_token(refresh_token: str, client_id: str, scope: str, proxy:
                     if attempt < 3:
                         wait = min(max(_retry_after_seconds(e), 2.0), 10.0)
                         _rate_penalize("token", client_id)
+                        _rate_feedback("token", client_id, "throttle")
                         logger.warning(f"[token] 端点 {idx} HTTP {e.code}（限流），歇 {wait:.0f}s 后重试（第 {attempt} 次）")
                         time.sleep(wait)
                         continue
@@ -465,20 +467,46 @@ def _refresh_token_for(cred: dict[str, Any], scope: str, email: str = "") -> dic
 # 安全线以下，超发请求排队等令牌（收码慢 1~2s，但不再雪崩）。
 # 桶按 client_id 分组——将来导入第二个 Azure 应用的号自动享受独立配额，
 # 并发上限随 client_id 数量线性扩展。
+# 速率是 AIMD 自适应的（加性增、乘性减）：连续成功 → 缓慢提速去探测真实
+# 上限；收到 429/503 或大面积超时 → 乘性退避。比拍脑袋写死 8rps 榨得更多。
 _GRAPH_RPS = float(os.getenv("MAILPOOL_GRAPH_RPS", "8"))
+# 上限按 2026-11-22 实战标定：聚合 10 rps（15 并发）100% 成功，13 rps（20 并发）
+# 整体退化；基准实测微软是「拖慢」式限流（15~30s stall，全程无 429），AIMD
+# 的 slow 信号（8s 硬超时）就是为它准备的。别把 MAX 调过 10 去赌。
 _GRAPH_BURST = float(os.getenv("MAILPOOL_GRAPH_BURST", "12"))
+_GRAPH_RPS_MAX = float(os.getenv("MAILPOOL_GRAPH_RPS_MAX", "10"))
+_GRAPH_RPS_MIN = float(os.getenv("MAILPOOL_GRAPH_RPS_MIN", "3"))
 _TOKEN_RPS = float(os.getenv("MAILPOOL_TOKEN_RPS", "4"))
 _TOKEN_BURST = float(os.getenv("MAILPOOL_TOKEN_BURST", "10"))
+_TOKEN_RPS_MAX = float(os.getenv("MAILPOOL_TOKEN_RPS_MAX", "8"))
+_TOKEN_RPS_MIN = float(os.getenv("MAILPOOL_TOKEN_RPS_MIN", "2"))
+# IMAP 车道软上限（并发连接数）：超出排队 10s，再超出放行（软限不丢活）
+_IMAP_MAX_CONNS = int(os.getenv("MAILPOOL_IMAP_MAX_CONNS", "24"))
+_AIMD_STEP = 0.5        # 每满 20 次连续成功，速率 +0.5 rps
+_AIMD_GOOD_RUN = 20
+_AIMD_THROTTLE_X = 0.7  # 429/503：速率 ×0.7
+_AIMD_SLOW_X = 0.9      # 硬超时（响应变慢的前兆）：速率 ×0.9
 
 
 class _TokenBucket:
-    """线程安全令牌桶：稳态速率 rate 个/秒，桶容量 burst 个（允许瞬时突发）。"""
+    """线程安全令牌桶 + AIMD 自适应速率。
 
-    def __init__(self, rate: float, burst: float) -> None:
-        self.rate = max(0.1, float(rate))
+    - acquire：拿令牌，桶空时最多等 max_wait 秒（排队而非硬打）。
+    - report：调用方把请求结局反馈进来，桶自动调速——
+        "ok" 连续 20 次 → +0.5 rps（探测真实上限）
+        "throttle"（429/503）→ ×0.7 + 清空桶（微软动手了，全体停一拍）
+        "slow"（硬超时）→ ×0.9（响应变慢是限流前兆，轻退一步）
+    """
+
+    def __init__(self, rate: float, burst: float, *,
+                 min_rate: float = 0.5, max_rate: float = 50.0) -> None:
+        self.min_rate = max(0.1, min_rate)
+        self.max_rate = max(self.min_rate, max_rate)
+        self.rate = min(max(self.min_rate, float(rate)), self.max_rate)
         self.burst = max(1.0, float(burst))
         self._tokens = self.burst
         self._updated = time.monotonic()
+        self._good = 0
         self._cv = threading.Condition()
 
     def acquire(self, max_wait: float = 5.0) -> bool:
@@ -497,6 +525,25 @@ class _TokenBucket:
                     return False
                 self._cv.wait(need)
 
+    def report(self, outcome: str) -> None:
+        """AIMD 调速入口（ok/throttle/slow），由 _rate_feedback 转发。"""
+        with self._cv:
+            if outcome == "ok":
+                self._good += 1
+                if self._good >= _AIMD_GOOD_RUN:
+                    old = self.rate
+                    self.rate = min(self.max_rate, self.rate + _AIMD_STEP)
+                    if self.rate != old:
+                        logger.info(f"[ratelimit] AIMD 提速 {old:.1f} → {self.rate:.1f} rps")
+                    self._good = 0
+                return
+            self._good = 0
+            factor = _AIMD_THROTTLE_X if outcome == "throttle" else _AIMD_SLOW_X
+            old = self.rate
+            self.rate = max(self.min_rate, round(self.rate * factor, 2))
+            if self.rate != old:
+                logger.info(f"[ratelimit] AIMD 退避({outcome}) {old:.1f} → {self.rate:.1f} rps")
+
     def penalize(self) -> None:
         """收到 429/503 后清空桶：所有线程一起停一拍，别继续顶风加压。"""
         with self._cv:
@@ -512,8 +559,13 @@ def _bucket_for(kind: str, client_id: str) -> _TokenBucket:
     key = (kind, str(client_id or "?").strip().lower())
     with _buckets_guard:
         if key not in _buckets:
-            rate, burst = (_TOKEN_RPS, _TOKEN_BURST) if kind == "token" else (_GRAPH_RPS, _GRAPH_BURST)
-            _buckets[key] = _TokenBucket(rate, burst)
+            if kind == "token":
+                bucket = _TokenBucket(_TOKEN_RPS, _TOKEN_BURST,
+                                      min_rate=_TOKEN_RPS_MIN, max_rate=_TOKEN_RPS_MAX)
+            else:
+                bucket = _TokenBucket(_GRAPH_RPS, _GRAPH_BURST,
+                                      min_rate=_GRAPH_RPS_MIN, max_rate=_GRAPH_RPS_MAX)
+            _buckets[key] = bucket
         return _buckets[key]
 
 
@@ -522,8 +574,39 @@ def _rate_acquire(kind: str, client_id: str, max_wait: float = 5.0) -> bool:
     return _bucket_for(kind, client_id).acquire(max_wait)
 
 
+def _rate_feedback(kind: str, client_id: str, outcome: str) -> None:
+    """把请求结局反馈给桶（ok/throttle/slow），AIMD 自动调速。"""
+    _bucket_for(kind, client_id).report(outcome)
+
+
 def _rate_penalize(kind: str, client_id: str) -> None:
     _bucket_for(kind, client_id).penalize()
+
+
+# ── Graph/IMAP 双车道调度 ────────────────────────────────────
+# 路由策略（2026-11-22 实测定型）：**IMAP 优先、Graph 兜底**。
+# - IMAP（outlook.office365.com）无 client_id 级聚合限流，21 并发基准满速
+#   零错误，天花板远高于 Graph；
+# - Graph（graph.microsoft.com）单 client_id 聚合 ~10 rps 封顶；
+# - 约 30% 的号原始授权没有 IMAP scope（token 端点直接拒绝），这批号
+#   首次 IMAP 失败即记忆，此后直连 Graph 兜底。
+_imap_lane = threading.BoundedSemaphore(max(1, _IMAP_MAX_CONNS))
+
+# 已确认「无 IMAP scope」的邮箱（2026-11-22 基准实测约 30% 的号原始授权只有
+# Graph scope，token 端点对 IMAP scope 直接拒绝）。这些号硬送 IMAP 车道只会
+# 撞死，记住它们直接走 Graph 兜底。
+_imap_no_scope: set[str] = set()
+_imap_no_scope_guard = threading.Lock()
+
+
+def _imap_close(M) -> None:
+    """关掉一条 IMAP 连接（容忍重复关 / 半死连接）。"""
+    if M is None:
+        return
+    try:
+        M.logout()
+    except Exception:
+        pass
 
 
 def _retry_after_seconds(exc: Exception) -> float:
@@ -880,6 +963,7 @@ class OutlookEmailProvider(EmailProvider):
                         wait = min(max(_retry_after_seconds(e), 2.0), 10.0)
                         wait = min(wait, max(0.0, deadline - time.time()))
                         _rate_penalize("graph", cid)
+                        _rate_feedback("graph", cid, "throttle")
                         round_slow = True
                         logger.warning(
                             f"[outlook-graph] HTTP {e.code}（限流）folder={folder}，歇 {wait:.0f}s 后继续"
@@ -897,11 +981,13 @@ class OutlookEmailProvider(EmailProvider):
                     break
                 except TimeoutError:
                     round_slow = True
+                    _rate_feedback("graph", cid, "slow")
                     logger.warning(f"[outlook-graph] folder={folder} 查询超 8s 已放弃，本轮降速")
                     continue
                 except Exception:
                     continue
                 round_ok = True
+                _rate_feedback("graph", cid, "ok")
                 for msg in messages:
                     mid = msg.get("id", "")
                     if not mid or mid in seen:
@@ -1021,43 +1107,64 @@ class OutlookEmailProvider(EmailProvider):
         seen: set[tuple] = set()
         stale_skipped = 0
 
-        while time.time() < deadline:
+        # IMAP 车道软限流：并发连接数排队 10s，拿不到也放行（软限不丢活）。
+        # 收尾统一走 _cleanup（关连接 + 还车道），所有出口都会调它。
+        if not _imap_lane.acquire(timeout=10.0):
+            logger.warning("[outlook-imap] 车道排队 10s 未获得，放行（超出软上限）")
+
+        def _cleanup() -> None:
+            nonlocal M
+            _imap_close(M)
             M = None
             try:
-                cached_token = _cached_token(email, IMAP_SCOPE)
-                if not cached_token:
-                    # 互斥刷新；轮换的新 rt 由 _refresh_token_for 落库。
-                    # 刷新失败不再降级密码登录——那是死路，只会白耗 60s
-                    # 超时预算并给账号添一次异常登录记录。
-                    data = _refresh_token_for(cred, IMAP_SCOPE, email=email)
-                    cached_token = data["access_token"]
-                    _cache_token(email, IMAP_SCOPE, cached_token, data.get("expires_in"))
+                _imap_lane.release()
+            except ValueError:
+                pass  # 未持有却释放（软限放行路径），忽略
 
-                last_err: Exception | None = None
-                for host in IMAP_SERVERS:
-                    if M:
-                        break
-                    if cached_token:
+        M = None
+        while time.time() < deadline:
+            try:
+                if M is None:
+                    # 连接 + 认证一次，轮询全程复用，断线才重建。
+                    # （旧版每轮 logout 重连：一轮 4~8s 里有 2~4s 烧在 TLS+XOAUTH2
+                    #   握手上，这就是 IMAP 车道以前又慢又贵的原因。）
+                    cached_token = _cached_token(email, IMAP_SCOPE)
+                    if not cached_token:
+                        # 互斥刷新；轮换的新 rt 由 _refresh_token_for 落库。
+                        # 刷新失败不再降级密码登录——那是死路，只会白耗 60s
+                        # 超时预算并给账号添一次异常登录记录。
+                        data = _refresh_token_for(cred, IMAP_SCOPE, email=email)
+                        cached_token = data["access_token"]
+                        _cache_token(email, IMAP_SCOPE, cached_token, data.get("expires_in"))
+
+                    last_err: Exception | None = None
+                    for host in IMAP_SERVERS:
+                        if M:
+                            break
+                        m = None
                         try:
-                            M = imaplib.IMAP4_SSL(host, 993, timeout=30)
+                            m = imaplib.IMAP4_SSL(host, 993, timeout=30)
                             auth_str = (
                                 f"user={email}\x01auth=Bearer {cached_token}\x01\x01"
                             )
-                            M.authenticate("XOAUTH2", lambda x: auth_str.encode())
-                            logger.info(f"[outlook-imap] ✓ XOAUTH2 登录成功 host={host}")
+                            m.authenticate("XOAUTH2", lambda x: auth_str.encode())
+                            M = m
+                            logger.info(f"[outlook-imap] ✓ XOAUTH2 登录成功 host={host}（连接复用）")
                         except Exception as e:
                             last_err = e
                             logger.info(f"[outlook-imap] ✗ XOAUTH2 登录失败 host={host}: {e}")
-                            try:
-                                M.logout()
-                            except Exception:
-                                pass
+                            _imap_close(m)
                             M = None
-                if not M:
-                    if last_err and _is_fatal_imap_error(last_err):
-                        logger.warning(f"[outlook-imap] 致命错误，标记账号失效: {last_err}")
-                        raise ProviderError(f"IMAP 登录失败: {last_err}", fatal=True)
-                    raise ProviderError(f"IMAP 连接失败: {last_err}")
+                    if not M:
+                        if last_err and _is_fatal_imap_error(last_err):
+                            logger.warning(f"[outlook-imap] 致命错误，标记账号失效: {last_err}")
+                            _cleanup()
+                            raise ProviderError(f"IMAP 登录失败: {last_err}", fatal=True)
+                        # 瞬时连接失败：歇 2s 下轮重试（第二车道要顶得住抖动；
+                        # 旧版这里直接 raise，一次网络抖动就废掉整个等待窗口）
+                        logger.warning(f"[outlook-imap] 连接失败（下轮重试）: {last_err}")
+                        time.sleep(min(2.0, max(0.0, deadline - time.time())))
+                        continue
 
                 if found_folders is None:
                     try:
@@ -1095,12 +1202,14 @@ class OutlookEmailProvider(EmailProvider):
                         if typ != "OK":
                             continue
                     except Exception:
-                        continue
+                        M = None  # 连接疑似断开：本轮放弃，下轮重连
+                        break
                     try:
                         typ, data = M.search(None, "ALL")
                         ids = data[0].split() if data and data[0] else []
                     except Exception:
-                        continue
+                        M = None
+                        break
                     # 先用 SEARCH 结果里最近的 8 封做候选；只 fetch 真正需要的
                     for mid in reversed(ids[-8:]):
                         # 每封都检查预算：一次 IMAP fetch 可能就要几秒，
@@ -1149,10 +1258,7 @@ class OutlookEmailProvider(EmailProvider):
                         sender = str(msg.get("From") or "")
                         subject = str(msg.get("Subject") or "")
                         body = _raw_to_text(raw[0][1])
-                        try:
-                            M.logout()
-                        except Exception:
-                            pass
+                        _cleanup()
                         return {
                             "code": code,
                             "message_id": mid_str,
@@ -1165,22 +1271,26 @@ class OutlookEmailProvider(EmailProvider):
                             "received_at": mail_date,
                             "code_source": "rule" if code else "none",
                         }
-                try:
-                    M.logout()
-                except Exception:
-                    pass
+                # 轮间等待：连接保活（NOOP），不再每轮 logout 重连
+                remain = deadline - time.time()
+                if remain > 0:
+                    if M is not None:
+                        try:
+                            M.noop()
+                        except Exception:
+                            M = None  # 保活失败：下轮重连
+                    time.sleep(min(2.0, remain))
             except ProviderError:
+                _cleanup()
                 raise
             except Exception as e:
                 if _is_fatal_imap_error(e):
+                    _cleanup()
                     raise ProviderError(f"IMAP 不可用 {email}: {e}", fatal=True)
                 logger.warning(f"[outlook-imap] 异常 (重试): {e}")
-                if M:
-                    try:
-                        M.logout()
-                    except Exception:
-                        pass
-            time.sleep(4)
+                _cleanup()  # 丢掉可疑连接，下轮重建
+                time.sleep(min(2.0, max(0.0, deadline - time.time())))
+        _cleanup()
         logger.info(f"[outlook-imap] 轮询超时未取到验证码 email={email}（已扫描 {len(seen)} 封，跳过旧信 {stale_skipped} 封）")
         return None
 
@@ -1200,45 +1310,63 @@ class OutlookEmailProvider(EmailProvider):
     def _wait_mail_sync(
         self, email: str, cred: dict[str, Any], timeout: float, skip_codes: set[str]
     ) -> dict[str, Any] | None:
-        """先走 Graph，**失败才**降级 IMAP，整体共享一个时间预算。
+        """双车道取件：**IMAP 优先，Graph 兜底**（2026-11-22 实测定型）。
+
+        依据（.tmp_diag/imap_bench.py + 上午实战）：
+        - IMAP 无 client_id 级聚合限流，21 并发基准满速零错误 → 当主车道；
+        - Graph 单 client_id 聚合 ~10 rps 封顶 → 只留给无 IMAP scope 的号
+          （约 30%，原始授权缺 IMAP scope，token 端点直接拒绝）和兜底；
+        - 无 IMAP scope 的号首次 IMAP 失败即记忆（_imap_no_scope），
+          此后不再浪费一次注定失败的 token 刷新。
 
         踩过的坑：
         1. 原来两条通道各自跑满 timeout → timeout=5 实际用了 16.6 秒。
-        2. 更严重的是 Graph 正常跑完（只是没新信）后还会再走一遍 IMAP，
-           等于同一个邮箱扫两遍，而 IMAP 刷新 token 本身就要 10~15 秒。
-           现在 Graph 成功执行就不再走 IMAP（同一邮箱，内容一样）。
+        2. 一条通道干净跑完（只是没新信）后不再用另一条重扫同一邮箱。
         """
         started = time.time()
         logger.info(f"[mail] 取件开始 email={email} timeout={timeout}s")
         has_graph = bool(cred.get("client_id") and cred.get("refresh_token"))
-        graph_error: Exception | None = None
-        if has_graph:
-            try:
-                mail = self._graph_wait_code(cred, email, timeout, skip_codes)
-                if mail:
-                    return mail
-                # Graph 正常完成但没新信：直接返回，不再用 IMAP 重扫同一个箱子
-                logger.info(
-                    f"[mail] Graph 通道无新信（耗时 {time.time() - started:.1f}s），"
-                    f"跳过 IMAP 重复扫描"
-                )
-                return None
-            except Exception as e:
-                graph_error = e
-                logger.info(f"[mail] Graph 通道异常，降级 IMAP：{type(e).__name__}: {e}")
+
+        if not has_graph:
+            # 无 OAuth 凭据：IMAP 直接 fatal（basic auth 已被微软禁用，无路可走）
+            self._imap_wait_code(cred, email, timeout, skip_codes)
+            return None
+
+        with _imap_no_scope_guard:
+            no_imap = email.lower() in _imap_no_scope
+
+        if no_imap:
+            # 已确认无 IMAP scope：Graph 是唯一通道（令牌桶会排队，不会雪崩）
+            mail = self._graph_wait_code(cred, email, timeout, skip_codes)
+            if mail:
+                return mail
+            return None
+
+        # IMAP 优先：整个等待窗口给 IMAP
+        try:
+            mail = self._imap_wait_code(cred, email, timeout, skip_codes)
+            if mail:
+                return mail
+            # 干净跑完没新信：INBOX/junk 都扫过了，Graph 重扫也是空
+            logger.info(f"[mail] IMAP 车道无新信（耗时 {time.time() - started:.1f}s）")
+            return None
+        except Exception as e:
+            # 首次失败即记忆（保守：瞬时网络抖动也会被记，代价只是此号
+            # 以后走 Graph 排队；换来的是不会再烧一次注定失败的刷新）
+            with _imap_no_scope_guard:
+                _imap_no_scope.add(email.lower())
+            logger.info(
+                f"[mail] IMAP 车道失败，标记无 scope 并退回 Graph 兜底："
+                f"{type(e).__name__}: {str(e)[:80]}"
+            )
 
         remaining = timeout - (time.time() - started)
         if remaining < 1.0:
-            logger.info(f"[mail] 时间预算已用尽（Graph 失败且无剩余预算），直接返回 None")
+            logger.info("[mail] 时间预算已用尽，返回 None")
             return None
-        try:
-            mail = self._imap_wait_code(cred, email, remaining, skip_codes)
-            if mail:
-                return mail
-        except Exception:
-            if graph_error is not None:
-                raise
-            raise
+        mail = self._graph_wait_code(cred, email, remaining, skip_codes)
+        if mail:
+            return mail
         return None
 
     def self_test(self) -> dict[str, Any]:

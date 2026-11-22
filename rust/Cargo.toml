@@ -1,0 +1,87 @@
+[package]
+name = "mailpool"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "MailPool — Outlook 邮箱池 / 取号收码服务（Rust 重写）"
+license = "MIT"
+
+[[bin]]
+name = "mailpool"
+path = "src/main.rs"
+
+[dependencies]
+# ── Web 框架 ──
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+axum-extra = { version = "0.10", features = ["cookie"] }
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "trace", "set-header"] }
+tokio = { version = "1", features = ["full"] }
+
+# ── 数据库 ──
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "macros",
+    "migrate",
+] }
+
+# ── 模板 ──
+minijinja = { version = "2", features = ["loader", "json", "builtins"] }
+minijinja-autoreload = "2"
+
+# ── 序列化 ──
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── 时间 / 随机 ──
+chrono = { version = "0.4", features = ["serde"] }
+time = "0.3"
+rand = "0.8"
+regex = "1"
+
+# ── HTTP 客户端（Graph / IMAP 之外的外部调用、支付回调）──
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "gzip",
+    "socks",
+    "rustls-tls",
+    "charset",
+] }
+url = "2"
+
+# ── IMAP（Outlook 降级通道）──
+imap = { version = "2.4", default-features = false, features = ["tls"] }
+native-tls = "0.2"
+mailparse = "0.16"
+
+# ── 加密 / 签名 ──
+sha2 = "0.10"
+sha1 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+base64 = "0.22"
+hex = "0.4"
+subtle = "2"
+md-5 = "0.10"   # IMAP XOAUTH2 的 SASL 需要；也用来算易支付签名
+
+# ── 定时任务 ──
+tokio-cron-scheduler = "0.13"
+
+# ── 日志 / 错误 ──
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+dotenvy = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -86,13 +86,13 @@
         <div>
             <label>{{ f.label }}{% if f.required %} <span style="color:#dc2626">*</span>{% endif %}</label>
             {% if f.type == 'textarea' %}
-            <textarea name="{{ f.key }}" placeholder="{{ f.placeholder }}" {% if f.required %}required{% endif %}>{{ p.config.get(f.key, f.default) }}</textarea>
+            <textarea name="{{ f.key }}" placeholder="{{ f.placeholder }}" {% if f.required %}required{% endif %}>{{ p.config[f.key]|default(f.default) }}</textarea>
             {% elif f.type == 'password' %}
-            <input type="password" name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config.get(f.key, '') }}">
+            <input type="password" name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config[f.key]|default('') }}">
             {% elif f.type == 'number' %}
-            <input type="number" name="{{ f.key }}" value="{{ p.config.get(f.key, f.default) }}">
+            <input type="number" name="{{ f.key }}" value="{{ p.config[f.key]|default(f.default) }}">
             {% else %}
-            <input name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config.get(f.key, f.default) }}">
+            <input name="{{ f.key }}" placeholder="{{ f.placeholder }}" value="{{ p.config[f.key]|default(f.default) }}">
             {% endif %}
             {% if f.help %}<div class="page-sub" style="font-size:12px">{{ f.help }}</div>{% endif %}
         </div>

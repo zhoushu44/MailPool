@@ -13,7 +13,7 @@
     <div class="stat-card"><div class="stat-value dead">{{ counts.dead }}</div><div class="stat-label">失效</div></div>
 </div>
 {% if health.last_scan_at %}
-<div class="page-sub" style="margin-bottom:12px">上次扫描：{{ health.last_scan_at[:19].replace('T', ' ') }}</div>
+<div class="page-sub" style="margin-bottom:12px">上次扫描：{{ health.last_scan_at[:19]|replace('T', ' ') }}</div>
 {% endif %}
 
 {% if cid_stats %}
@@ -93,10 +93,11 @@
             <td class="mono">{{ a.email }}</td>
             <td>{{ a.provider }}</td>
             <td>
-                {% if a.status == 'healthy' %}<span class="badge badge-available">正常</span>
-                {% elif a.status == 'available' %}<span class="badge badge-available">未检测</span>
-                {% elif a.status == 'using' %}<span class="badge badge-using">占用</span>
-                {% elif a.status == 'unhealthy' %}<span class="badge badge-dead">异常</span>
+                {% if a.display_status == 'healthy' %}<span class="badge badge-available">正常</span>
+                {% elif a.display_status == 'available' %}<span class="badge badge-available">可用</span>
+                {% elif a.display_status == 'using' %}<span class="badge badge-using">占用</span>
+                {% elif a.display_status == 'unhealthy' %}<span class="badge badge-dead">异常</span>
+                {% elif a.display_status == 'retired' %}<span class="badge badge-dead">已退役</span>
                 {% else %}<span class="badge badge-dead">失效</span>{% endif %}
                 {% if a.used_by %}<span class="badge badge-using" title="已被项目用过，其他项目不可再取">被 {{ a.used_by }} 绑定</span>{% endif %}
             </td>

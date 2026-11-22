@@ -164,3 +164,151 @@ class TestTokenCache:
     def test_bad_expires_in_falls_back(self):
         ol._cache_token("bad@test", ol.GRAPH_SCOPE, "tok", "abc")  # 字符串垃圾值
         assert ol._cached_token("bad@test", ol.GRAPH_SCOPE) == "tok"
+
+
+# ── AIMD 自适应速率 ───────────────────────────────────────────
+class TestAimd:
+    def test_grows_after_good_run(self):
+        b = ol._TokenBucket(8, 12, min_rate=3, max_rate=14)
+        for _ in range(ol._AIMD_GOOD_RUN):
+            b.report("ok")
+        assert b.rate == 8.5
+
+    def test_throttle_backs_off_multiplicatively(self):
+        b = ol._TokenBucket(8, 12, min_rate=3, max_rate=14)
+        b.report("throttle")
+        assert b.rate == 5.6          # 8 × 0.7
+
+    def test_slow_is_gentler(self):
+        b = ol._TokenBucket(10, 12, min_rate=3, max_rate=14)
+        b.report("slow")
+        assert b.rate == 9.0          # 10 × 0.9
+
+    def test_bounds_clamp(self):
+        b = ol._TokenBucket(8, 12, min_rate=3, max_rate=14)
+        for _ in range(50):
+            b.report("throttle")
+        assert b.rate == 3
+        for _ in range(5000):
+            b.report("ok")
+        assert b.rate == 14
+
+
+# ── 双车道：IMAP 优先，Graph 兜底 ─────────────────────────────
+class TestDualLane:
+    CRED = {"client_id": "c", "refresh_token": "r"}
+
+    def test_imap_first_for_unknown_account(self, monkeypatch):
+        """未标记的号：IMAP 优先，Graph 不该被调用。"""
+        p = ol.OutlookEmailProvider()
+        calls = []
+        monkeypatch.setattr(p, "_imap_wait_code",
+                            lambda *a, **k: calls.append("imap") or None)
+        monkeypatch.setattr(p, "_graph_wait_code",
+                            lambda *a, **k: calls.append("graph") or None)
+        result = p._wait_mail_sync("u@t.test", dict(self.CRED), 2.0, set())
+        assert result is None
+        assert calls == ["imap"], calls
+
+    def test_no_scope_goes_straight_to_graph(self, monkeypatch):
+        """已标记无 IMAP scope（约 30% 池子）：直接 Graph 兜底，不碰 IMAP。"""
+        p = ol.OutlookEmailProvider()
+        with ol._imap_no_scope_guard:
+            ol._imap_no_scope.add("ns@t.test")
+        calls = []
+        try:
+            monkeypatch.setattr(p, "_imap_wait_code",
+                                lambda *a, **k: calls.append("imap") or None)
+            monkeypatch.setattr(p, "_graph_wait_code",
+                                lambda *a, **k: calls.append("graph") or None)
+            p._wait_mail_sync("ns@t.test", dict(self.CRED), 2.0, set())
+            assert calls == ["graph"], calls
+        finally:
+            with ol._imap_no_scope_guard:
+                ol._imap_no_scope.discard("ns@t.test")
+
+    def test_imap_failure_marks_and_falls_back_to_graph(self, monkeypatch):
+        """IMAP 失败：标记无 scope + 用剩余预算走 Graph 兜底，不许判死。"""
+        p = ol.OutlookEmailProvider()
+        calls = []
+
+        def imap_fail(*a, **k):
+            calls.append("imap")
+            raise RuntimeError("token 获取失败 (scope=IMAP)")
+
+        monkeypatch.setattr(p, "_imap_wait_code", imap_fail)
+        monkeypatch.setattr(p, "_graph_wait_code",
+                            lambda *a, **k: calls.append("graph") or None)
+        try:
+            p._wait_mail_sync("fb@t.test", dict(self.CRED), 2.0, set())
+            assert calls == ["imap", "graph"], calls
+            with ol._imap_no_scope_guard:
+                assert "fb@t.test" in ol._imap_no_scope, "失败号应被标记无 IMAP scope"
+        finally:
+            with ol._imap_no_scope_guard:
+                ol._imap_no_scope.discard("fb@t.test")
+
+    def test_no_oauth_raises_fatal_via_imap(self):
+        """无 OAuth 凭据：IMAP 通道直接 fatal（微软已禁 basic auth，保持原语义）。"""
+        p = ol.OutlookEmailProvider()
+        with pytest.raises(ol.ProviderError):
+            p._wait_mail_sync("x@t.test", {}, 2.0, set())
+
+
+# ── IMAP 持久连接 ─────────────────────────────────────────────
+class TestImapPersistentConn:
+    def test_single_connection_across_rounds(self, monkeypatch):
+        """轮询全程应复用一条连接（NOOP 保活），不再每轮 TLS 重连。"""
+        p = ol.OutlookEmailProvider()
+        monkeypatch.setattr(ol, "_refresh_token_for",
+                            lambda *a, **k: {"access_token": "fake"})
+
+        class FakeIMAP:
+            instances = 0
+
+            def __init__(self, host, port, timeout=None):
+                FakeIMAP.instances += 1
+                self.noops = 0
+
+            def authenticate(self, mech, fn):
+                return ("OK", [b""])
+
+            def list(self):
+                return ("OK", [b'(\\HasNoChildren) "/" INBOX', b'(\\HasNoChildren) "/" Junk'])
+
+            def select(self, folder, readonly=False):
+                return ("OK", [b"0"])
+
+            def search(self, charset, criteria):
+                return ("OK", [b""])     # 空收件箱
+
+            def noop(self):
+                self.noops += 1
+                return ("OK", [b""])
+
+            def logout(self):
+                return ("BYE", None)
+
+        monkeypatch.setattr(ol.imaplib, "IMAP4_SSL", FakeIMAP)
+        result = p._imap_wait_code(
+            {"client_id": "c", "refresh_token": "r"}, "persist@t.test", 4.5, set())
+        assert result is None
+        assert FakeIMAP.instances == 1, f"应只建 1 条连接，实际 {FakeIMAP.instances}"
+
+    def test_lane_semaphore_released(self, monkeypatch):
+        """车道信号量必须归还：连跑两次不会把配额烧穿。"""
+        p = ol.OutlookEmailProvider()
+        monkeypatch.setattr(ol, "_refresh_token_for",
+                            lambda *a, **k: {"access_token": "fake"})
+        monkeypatch.setattr(ol.imaplib, "IMAP4_SSL",
+                            lambda *a, **k: (_ for _ in ()).throw(OSError("refused")))
+        # 连接全失败也会走完 _cleanup 归还车道
+        for i in range(ol._IMAP_MAX_CONNS + 2):
+            try:
+                p._imap_wait_code({"client_id": "c", "refresh_token": "r"},
+                                  f"s{i}@t.test", 0.3, set())
+            except ol.ProviderError:
+                pass
+        # 若信号量没归还，这里 acquire 立刻拿满后会超时
+        assert ol._imap_lane.acquire(timeout=0.1), "车道信号量泄漏"
+        ol._imap_lane.release()
