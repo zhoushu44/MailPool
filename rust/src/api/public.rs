@@ -82,9 +82,30 @@ pub async fn product_info(State(st): State<std::sync::Arc<AppState>>) -> AppResu
         }));
     }
 
+    // 独占邮箱：库存 + 价格（原来硬编码 null/空串，前端没法显示）
+    let exclusive_stock = crate::services::exclusive::count_available(pool_ref, "outlook")
+        .await
+        .unwrap_or(0);
+    let exclusive_price = if billing_on {
+        let milli: i64 = crate::services::settings::get_value(
+            pool_ref, "exclusive.price", "0",
+        )
+        .await
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+        crate::money::Money::from_milli(milli).to_yuan()
+    } else {
+        String::new()
+    };
+
     Ok(ok(json!({
         "temporary": temporary,
-        "exclusive": {"stock": null, "price": "", "original_price": ""},
+        "exclusive": {
+              "stock": exclusive_stock,
+              "price": exclusive_price,
+              "original_price": "",
+          },
     })))
 }
 

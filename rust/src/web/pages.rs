@@ -738,6 +738,21 @@ async fn pool_page(
 /// `GET /buy-email` —— 商城：项目卡片按「价格 / 库存 / 过滤规则」展示。
 
 
+
+/// `GET /app/exclusive` —— 独占邮箱页。
+async fn app_exclusive_page(
+    State(st): State<Arc<AppState>>,
+    Extension(t): Extension<Arc<Templates>>,
+    identity: Identity,
+) -> AppResult<Response> {
+    if !identity.is_admin && identity.user_id.is_none() {
+        return Ok(redirect_302("/app/login"));
+    }
+    let billing_cfg = settings::get_billing_config(&st.pool).await?;
+    let ctx = customer_ctx(&identity, billing_cfg.is_enabled(), "exclusive");
+    render_html(&t, "app_exclusive.html", &ctx)
+}
+
 /// `GET /app/register` —— 客户注册页。
 ///
 /// 后端注册接口早就有（`/api/v1/auth/register` + `/api/v1/auth/send-code`），
@@ -1527,6 +1542,7 @@ pub fn router(templates: Arc<Templates>) -> axum::Router<Arc<AppState>> {
         .route("/app", get(|| async { redirect_302("/app/buy-email") }))
         .route("/app/login", get(user_login_page).post(user_login_submit))
         .route("/app/register", get(app_register_page))
+        .route("/app/exclusive", get(app_exclusive_page))
         .route("/app/logout", get(user_logout))
         .route("/app/buy-email", get(buy_email_page))
         .route("/app/orders", get(orders_page))

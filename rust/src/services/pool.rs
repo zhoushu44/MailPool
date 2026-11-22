@@ -75,6 +75,7 @@ pub async fn count_claimable(
         "SELECT COUNT(*) FROM email_accounts a \
          WHERE a.provider = ? AND a.pool_status = 'available' \
            AND a.health_status IN ('healthy','unknown') \
+           AND COALESCE(a.exclusive_owner, 0) = 0 \
            AND a.email NOT IN (SELECT email FROM email_usages WHERE project_code = ?)",
     )
     .bind(provider)
@@ -132,6 +133,7 @@ pub async fn count_claimable_bulk(
                  WHERE a.provider = p.provider \
                    AND a.pool_status = 'available' \
                    AND a.health_status IN ('healthy','unknown') \
+                   AND COALESCE(a.exclusive_owner, 0) = 0 \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM email_usages u \
                        WHERE u.email = a.email AND u.project_code = p.code \
@@ -1050,51 +1052,56 @@ mod tests {
     // ────────────────────────────────────────────────────────────
 
     /// 建一个最小可用的内存库（accounts + usages + projects）。
+
+
+    /// 测试用：插一个项目（补齐 NOT NULL 列）。
+    async fn seed_project(pool: &sqlx::SqlitePool, code: &str) {
+        sqlx::query(
+            "INSERT INTO projects (code, name, provider, config_json, enabled, created_at) \
+             VALUES (?, ?, 'outlook', '{}', 1, ?)",
+        )
+        .bind(code)
+        .bind(code)
+        .bind(now_naive())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 测试用：插一个可 claim 的账号。
+    ///
+    /// 完整 schema 里 email_accounts 有多列 NOT NULL，
+    /// 直接 INSERT 很容易漏（provider / created_at…）。
+    async fn seed_account(pool: &sqlx::SqlitePool, email: &str) {
+        seed_account_with(pool, email, "healthy").await;
+    }
+
+    async fn seed_account_with(pool: &sqlx::SqlitePool, email: &str, health: &str) {
+        sqlx::query(
+            "INSERT INTO email_accounts \
+             (email, provider, account_json, status, pool_status, health_status, created_at) \
+             VALUES (?, 'outlook', '{}', 'available', 'available', ?, ?)",
+        )
+        .bind(email)
+        .bind(health)
+        .bind(now_naive())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// 建一个内存库。
+    ///
+    /// 用 `db::init_db`（完整 schema）而不是手写最小表 —— 手写表会漏掉
+    /// 后续新增的列（比如独占邮箱加的 `exclusive_owner`），
+    /// 导致 SQL 引用新列时测试全挂，而生产是对的，白费排查时间。
     async fn setup_stock_db() -> sqlx::SqlitePool {
-        // 内存库：每个测试独立，互不干扰
         use std::str::FromStr;
         let opts = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .create_if_missing(true);
         let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
-
-        sqlx::query(
-            "CREATE TABLE email_accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                provider TEXT NOT NULL DEFAULT 'outlook',
-                pool_status TEXT NOT NULL DEFAULT 'available',
-                health_status TEXT NOT NULL DEFAULT 'healthy'
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE email_usages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                project_code TEXT NOT NULL,
-                first_used_at DATETIME
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        sqlx::query(
-            "CREATE TABLE projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT NOT NULL,
-                provider TEXT NOT NULL DEFAULT 'outlook',
-                enabled INTEGER NOT NULL DEFAULT 1
-            )",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
+        crate::db::init_db(&pool).await.unwrap();
         pool
     }
 
@@ -1108,32 +1115,20 @@ mod tests {
 
         // 池子里 5 个可用号：a b c d e
         for e in ["a@x.test", "b@x.test", "c@x.test", "d@x.test", "e@x.test"] {
-            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
-                .bind(e)
-                .execute(&pool)
-                .await
-                .unwrap();
+            seed_account(&pool, e).await;
         }
         // 外加 3 个**已不在池子里**的号（health=dead）
         for e in ["f@x.test", "g@x.test", "h@x.test"] {
-            sqlx::query(
-                "INSERT INTO email_accounts (email, health_status) VALUES (?, 'dead')",
-            )
-            .bind(e)
-            .execute(&pool)
-            .await
-            .unwrap();
+            seed_account_with(&pool, e, "dead").await;
         }
 
-        sqlx::query("INSERT INTO projects (code) VALUES ('p1')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        seed_project(&pool, "p1").await;
 
         // p1 用过 a、b（还在池子里）和 f、g、h（已经死了）
         for e in ["a@x.test", "b@x.test", "f@x.test", "g@x.test", "h@x.test"] {
-            sqlx::query("INSERT INTO email_usages (email, project_code) VALUES (?, 'p1')")
+            sqlx::query("INSERT INTO email_usages (email, project_code, first_used_at) VALUES (?, 'p1', ?)")
                 .bind(e)
+                .bind(now_naive())
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1154,16 +1149,9 @@ mod tests {
     async fn stock_full_for_unused_project() {
         let pool = setup_stock_db().await;
         for e in ["a@x.test", "b@x.test", "c@x.test"] {
-            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
-                .bind(e)
-                .execute(&pool)
-                .await
-                .unwrap();
+            seed_account(&pool, e).await;
         }
-        sqlx::query("INSERT INTO projects (code) VALUES ('fresh')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        seed_project(&pool, "fresh").await;
 
         let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
         assert_eq!(m.get("fresh").copied().unwrap(), 3);
@@ -1174,20 +1162,13 @@ mod tests {
     async fn stock_is_per_project_independent() {
         let pool = setup_stock_db().await;
         for e in ["a@x.test", "b@x.test"] {
-            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
-                .bind(e)
-                .execute(&pool)
-                .await
-                .unwrap();
+            seed_account(&pool, e).await;
         }
         for c in ["p1", "p2"] {
-            sqlx::query("INSERT INTO projects (code) VALUES (?)")
-                .bind(c)
-                .execute(&pool)
-                .await
-                .unwrap();
+            seed_project(&pool, c).await;
         }
-        sqlx::query("INSERT INTO email_usages (email, project_code) VALUES ('a@x.test', 'p1')")
+        sqlx::query("INSERT INTO email_usages (email, project_code, first_used_at) VALUES ('a@x.test', 'p1', ?)")
+            .bind(now_naive())
             .execute(&pool)
             .await
             .unwrap();
@@ -1201,18 +1182,13 @@ mod tests {
     #[tokio::test]
     async fn stock_never_negative() {
         let pool = setup_stock_db().await;
-        sqlx::query("INSERT INTO email_accounts (email) VALUES ('only@x.test')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO projects (code) VALUES ('hungry')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        seed_account(&pool, "only@x.test").await;
+        seed_project(&pool, "hungry").await;
         // 用过 10 个（其中 9 个是已消失的号）
         for i in 0..10 {
-            sqlx::query("INSERT INTO email_usages (email, project_code) VALUES (?, 'hungry')")
+            sqlx::query("INSERT INTO email_usages (email, project_code, first_used_at) VALUES (?, 'hungry', ?)")
                 .bind(format!("gone{i}@x.test"))
+                .bind(now_naive())
                 .execute(&pool)
                 .await
                 .unwrap();
@@ -1226,20 +1202,9 @@ mod tests {
     #[tokio::test]
     async fn stock_excludes_dead_accounts() {
         let pool = setup_stock_db().await;
-        sqlx::query("INSERT INTO email_accounts (email) VALUES ('ok@x.test')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO email_accounts (email, health_status) VALUES ('dead@x.test', 'dead')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("INSERT INTO projects (code) VALUES ('p')")
-            .execute(&pool)
-            .await
-            .unwrap();
+        seed_account(&pool, "ok@x.test").await;
+        seed_account_with(&pool, "dead@x.test", "dead").await;
+        seed_project(&pool, "p").await;
 
         let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
         assert_eq!(m.get("p").copied().unwrap(), 1, "只算 healthy 的");
@@ -1249,18 +1214,16 @@ mod tests {
     #[tokio::test]
     async fn disabled_projects_excluded() {
         let pool = setup_stock_db().await;
-        sqlx::query("INSERT INTO email_accounts (email) VALUES ('a@x.test')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO projects (code, enabled) VALUES ('on', 1)")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO projects (code, enabled) VALUES ('off', 0)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        seed_account(&pool, "a@x.test").await;
+        seed_project(&pool, "on").await;
+        sqlx::query(
+            "INSERT INTO projects (code, name, provider, config_json, enabled, created_at) \
+             VALUES ('off', 'off', 'outlook', '{}', 0, ?)",
+        )
+        .bind(now_naive())
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
         assert!(m.contains_key("on"));

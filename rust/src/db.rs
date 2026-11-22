@@ -284,6 +284,11 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     // 2) 老库补列（Python 版历史上用 ALTER TABLE 逐列加过）
     migrate_add_columns(pool).await?;
 
+    // 独占邮箱表（幂等建表 + 给 email_accounts 加 exclusive_owner 列）
+    crate::services::exclusive::ensure_schema(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("建独占邮箱表失败: {e}"))?;
+
     // 3) 约束重建：老库的 email_usages / email_orders 是「email 单列唯一」，
     //    与现在的「(email, project_code) 组合唯一」冲突 —— 要重建表。
     migrate_rebuild_constraints(pool).await?;

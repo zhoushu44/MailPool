@@ -1,0 +1,259 @@
+{% extends "base_customer.html" %}
+{% block title %}独占邮箱{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">独占邮箱</div>
+        <div class="page-sub">
+            买断一个邮箱长期持有，<b>不会分配给其他用户</b>，可反复收件
+        </div>
+    </div>
+</div>
+
+{# 与临时邮箱的差异说明：对齐 MailNest 文档的「使用场景 / 特点」表达方式 #}
+<div class="ex-hero">
+    <div class="ex-hero-main">
+        <div class="ex-hero-title">仅属于你，长期可用</div>
+        <div class="ex-hero-desc">
+            临时邮箱按项目分配、超时自动回收；独占邮箱是一次买断，
+            这个邮箱从此只归你，任何项目都能用，收到的所有邮件都会显示。
+        </div>
+        <div class="ex-hero-tags">
+            <span class="ex-tag">不限项目</span>
+            <span class="ex-tag">不限时长</span>
+            <span class="ex-tag">全部邮件</span>
+            <span class="ex-tag">可主动释放</span>
+        </div>
+    </div>
+    <div class="ex-hero-buy">
+        <div class="ex-price-label">单价</div>
+        <div class="ex-price" id="exPrice">免费</div>
+        <div class="ex-stock" id="exStock">库存查询中…</div>
+        <button class="ex-buy-btn" id="exBuyBtn" onclick="buyExclusive()">立即购买</button>
+    </div>
+</div>
+
+<div class="card" style="margin-top:18px">
+    <div class="card-title">
+        我的独占邮箱
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" onclick="loadMine()">刷新</button>
+    </div>
+    <div id="exList">
+        <div class="empty">加载中…</div>
+    </div>
+</div>
+
+<style>
+.ex-hero {
+    display: flex;
+    align-items: stretch;
+    gap: 20px;
+    background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%);
+    border: 1px solid rgba(226,232,240,.8);
+    border-radius: 16px;
+    padding: 26px 28px;
+}
+.ex-hero-main { flex: 1; min-width: 0; }
+.ex-hero-title {
+    font-size: 19px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #0f172a;
+    margin-bottom: 8px;
+}
+.ex-hero-desc {
+    font-size: 13.5px;
+    color: #64748b;
+    line-height: 1.65;
+    margin-bottom: 14px;
+    max-width: 560px;
+}
+.ex-hero-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+.ex-tag {
+    font-size: 12px;
+    color: #2563eb;
+    background: rgba(37,99,235,.08);
+    padding: 4px 11px;
+    border-radius: 9999px;
+    font-weight: 500;
+}
+.ex-hero-buy {
+    flex: 0 0 200px;
+    background: #fff;
+    border: 1px solid rgba(226,232,240,.8);
+    border-radius: 14px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: center;
+}
+.ex-price-label { font-size: 11.5px; color: #94a3b8; letter-spacing: .04em; }
+.ex-price {
+    font-size: 26px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #0f172a;
+    margin: 4px 0 2px;
+}
+.ex-stock { font-size: 12px; color: #64748b; margin-bottom: 14px; }
+.ex-buy-btn {
+    width: 100%;
+    height: 40px;
+    border: none;
+    border-radius: 9999px;
+    background: #0f172a;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity .15s;
+}
+.ex-buy-btn:hover:not(:disabled) { opacity: .9; }
+.ex-buy-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.ex-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 4px;
+    border-bottom: 1px solid rgba(226,232,240,.6);
+}
+.ex-row:last-child { border-bottom: none; }
+.ex-row-mail {
+    font-family: ui-monospace, monospace;
+    font-size: 13.5px;
+    font-weight: 550;
+    color: #0f172a;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ex-row-meta { font-size: 12px; color: #94a3b8; flex-shrink: 0; }
+.ex-row-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.ex-btn-sm {
+    height: 30px;
+    padding: 0 14px;
+    border-radius: 9999px;
+    border: 1px solid #e2e8f0;
+    background: #fff;
+    color: #0f172a;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background .15s;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+}
+.ex-btn-sm:hover { background: #f8fafc; text-decoration: none; }
+.ex-btn-danger { color: #dc2626; border-color: rgba(220,38,38,.25); }
+.ex-btn-danger:hover { background: rgba(220,38,38,.05); }
+
+@media (max-width: 860px) {
+    .ex-hero { flex-direction: column; padding: 20px; }
+    .ex-hero-buy { flex: none; }
+    .ex-row { flex-wrap: wrap; gap: 8px; }
+    .ex-row-mail { flex-basis: 100%; }
+}
+</style>
+
+<script>
+async function loadStock() {
+    try {
+        const r = await api('/api/app/exclusive/stock');
+        if (r.code === '00000') {
+            const n = r.data.available;
+            document.getElementById('exStock').textContent = n > 0 ? ('仅剩 ' + n + ' 个') : '暂时售罄';
+            document.getElementById('exBuyBtn').disabled = n <= 0;
+        }
+    } catch (e) { /* 忽略 */ }
+}
+
+async function loadMine() {
+    const box = document.getElementById('exList');
+    try {
+        const r = await api('/api/app/exclusive/list');
+        if (r.code !== '00000') {
+            box.innerHTML = '<div class="empty">' + esc(r.msg || '加载失败') + '</div>';
+            return;
+        }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) {
+            box.innerHTML = '<div class="empty">还没有独占邮箱<br>'
+                + '<span style="font-size:12.5px">购买后可以长期持有，任何项目都能用</span></div>';
+            return;
+        }
+        box.innerHTML = items.map(it => {
+            const when = String(it.created_at || '').replace('T',' ').slice(0,10);
+            return '<div class="ex-row">'
+                 +   '<div class="ex-row-mail">' + esc(it.email) + '</div>'
+                 +   '<div class="ex-row-meta">' + when + ' 购买</div>'
+                 +   '<div class="ex-row-actions">'
+                 +     '<a class="ex-btn-sm" href="/app/mailbox?email=' + encodeURIComponent(it.email) + '">收件</a>'
+                 +     '<button class="ex-btn-sm ex-btn-danger" onclick="releaseEx(\'' + esc(it.email) + '\')">释放</button>'
+                 +   '</div>'
+                 + '</div>';
+        }).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+    }
+}
+
+async function buyExclusive() {
+    const btn = document.getElementById('exBuyBtn');
+    if (!confirm('购买一个独占邮箱？\n\n买断后该邮箱只属于你，可长期使用。')) return;
+    btn.disabled = true;
+    btn.textContent = '购买中…';
+    try {
+        const r = await api('/api/app/exclusive/buy', {
+            method: 'POST',
+            body: JSON.stringify({ count: 1 })
+        });
+        if (r.code === '00000' && r.data && r.data.length) {
+            const e = r.data[0];
+            toast('已获得 ' + e.email, 'ok');
+            loadMine();
+            loadStock();
+        } else {
+            toast(r.msg || '购买失败', 'error');
+        }
+    } catch (e) {
+        toast('购买失败：' + e.message, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '立即购买';
+    }
+}
+
+async function releaseEx(email) {
+    if (!confirm('释放 ' + email + '？\n\n释放后它会回到公共池，其他用户可能买到。')) return;
+    try {
+        const r = await api('/api/app/exclusive/release', {
+            method: 'POST',
+            body: JSON.stringify({ email: email })
+        });
+        if (r.code === '00000') {
+            toast('已释放', 'ok');
+            loadMine();
+            loadStock();
+        } else {
+            toast(r.msg || '释放失败', 'error');
+        }
+    } catch (e) {
+        toast('释放失败：' + e.message, 'error');
+    }
+}
+
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+(async function init() {
+    await Promise.all([loadStock(), loadMine()]);
+})();
+</script>
+{% endblock %}

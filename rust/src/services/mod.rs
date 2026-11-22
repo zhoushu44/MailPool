@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod batch;
 pub mod billing;
+pub mod exclusive;
 pub mod mail;
 pub mod mailer;
 pub mod payment;

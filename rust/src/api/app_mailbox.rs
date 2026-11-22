@@ -72,18 +72,20 @@ async fn ensure_owns(
     }
 
     // 退回 email_usages（没有订单表的旧数据）
-    let n2: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM email_usages WHERE lower(email) = lower(?)",
+    // 独占邮箱：直接看归属表
+    let n3: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM exclusive_emails \
+         WHERE lower(email) = lower(?) AND user_id = ? AND status = 'active'",
     )
     .bind(email)
+    .bind(uid)
     .fetch_one(pool)
     .await?;
-
-    if n2 > 0 {
-        Ok(())
-    } else {
-        Err(AppError::unauthorized("这个邮箱不在你的取号记录里"))
+    if n3 > 0 {
+        return Ok(());
     }
+
+    Err(AppError::unauthorized("这个邮箱不在你的取号记录里"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,10 +131,15 @@ async fn my_emails(
                  WHERE e.email = u.email AND e.project_code = u.project_code AND e.user_id = ? \
              ) \
                AND EXISTS (SELECT 1 FROM email_orders e2 WHERE e2.email = u.email AND e2.user_id = ?) \
+             UNION \
+             SELECT x.email AS mail, '(独占)' AS proj, x.created_at AS ts \
+             FROM exclusive_emails x \
+             WHERE x.user_id = ? AND x.status = 'active' \
          ) AS sub \
          LEFT JOIN email_accounts a ON lower(a.email) = lower(sub.mail) \
          ORDER BY sub.ts DESC LIMIT ?",
     )
+    .bind(uid)
     .bind(uid)
     .bind(uid)
     .bind(uid)

@@ -25,6 +25,7 @@
         {% if user_logged_in %}
         <nav class="cust-nav">
             <a href="/app/buy-email" class="cust-nav-item {% if active == 'buy-email' %}active{% endif %}">购买邮箱</a>
+            <a href="/app/exclusive" class="cust-nav-item {% if active == 'exclusive' %}active{% endif %}">独占邮箱</a>
             {% if billing_on %}
             <a href="/app/orders" class="cust-nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>
             {% endif %}
@@ -55,6 +56,9 @@
 {% if user_logged_in %}<nav class="cust-bottomnav">
     <a href="/app/buy-email" class="cust-bottomnav-item {% if active == 'buy-email' %}active{% endif %}">
         <span class="cust-bottomnav-ico">◈</span>购买邮箱
+    </a>
+    <a href="/app/exclusive" class="cust-bottomnav-item {% if active == 'exclusive' %}active{% endif %}">
+        <span class="cust-bottomnav-ico">◆</span>独占
     </a>
     {% if billing_on %}
     <a href="/app/orders" class="cust-bottomnav-item {% if active == 'orders' %}active{% endif %}">
