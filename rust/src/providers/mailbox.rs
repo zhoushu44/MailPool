@@ -323,12 +323,26 @@ pub async fn fetch_messages(
 #[cfg(test)]
 mod tests {
 
+    /// 操作全局 `IMAP_NO_SCOPE` 的测试必须串行。
+    ///
+    /// 这些测试共享同一个进程级 `static`，cargo 默认多线程并行跑测试，
+    /// 一个测试里的 `clear_no_imap_scope()` 会把另一个测试刚标记的条目抹掉，
+    /// 造成随机失败（实测：`no_scope_mark_is_case_insensitive` 偶发挂）。
+    ///
+    /// 用一把全局锁把这类测试串起来，比改成 `#[serial]` 少引一个 crate。
+    static NO_SCOPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_no_scope() -> std::sync::MutexGuard<'static, ()> {
+        NO_SCOPE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     // ────────────────────────────────────────────────────────────
     //  路由语义回归（对齐 Python TestDualLane 的 4 个用例）
     // ────────────────────────────────────────────────────────────
 
     #[test]
     fn no_scope_mark_is_case_insensitive() {
+        let _g = lock_no_scope();
         clear_no_imap_scope();
         mark_no_imap_scope("Foo@Bar.TEST");
         assert!(is_no_imap_scope("foo@bar.test"));
@@ -339,6 +353,7 @@ mod tests {
 
     #[test]
     fn no_scope_does_not_leak_between_accounts() {
+        let _g = lock_no_scope();
         clear_no_imap_scope();
         mark_no_imap_scope("a@test.com");
         assert!(!is_no_imap_scope("b@test.com"), "标记不能串号");

@@ -6,27 +6,16 @@
         <div class="page-title">费用明细</div>
         <div class="page-sub">
             {% if billing_on %}
-            每一笔余额变动都有据可查：取号冻结、收到验证码实扣、释放解冻、充值到账
+            每一笔余额变动都有据可查
             {% else %}
-            未接入计费，以下为收件流水，全部免费
+            未接入计费，以下为收件流水
             {% endif %}
         </div>
     </div>
     <button class="btn btn-ghost" onclick="location.reload()">刷新</button>
 </div>
 
-{% if billing_on %}
-<div class="card">
-    <div class="card-title">余额总览</div>
-    <div class="mn-account-grid">
-        <div class="mn-account-item"><span class="mn-account-label">总余额：</span><span class="mono">{{ snapshot.balance }} 元</span></div>
-        <div class="mn-account-item"><span class="mn-account-label">可用余额：</span><span class="mono">{{ snapshot.available_balance }} 元</span></div>
-        <div class="mn-account-item"><span class="mn-account-label">冻结余额：</span><span class="mono">{{ snapshot.frozen_balance }} 元</span></div>
-        <div class="mn-account-item"><span class="mn-account-label">扫码充值：</span><span class="mono">{{ snapshot.scan_recharge }} 元</span></div>
-        <div class="mn-account-item"><span class="mn-account-label">充值卡：</span><span class="mono">{{ snapshot.card_recharge }} 元</span></div>
-    </div>
-</div>
-{% endif %}
+
 
 <div class="card">
     <form method="get" class="mn-filter-row">

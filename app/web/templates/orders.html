@@ -22,7 +22,7 @@
             <select name="project_code">
                 <option value="">全部</option>
                 {% for p in projects %}
-                <option value="{{ p.code }}" {% if filter_project == p.code %}selected{% endif %}>{{ p.code }}</option>
+                <option value="{{ p.code }}" {% if filter_project == p.code %}selected{% endif %}>{{ p.name or p.code }}</option>
                 {% endfor %}
             </select>
         </div>
@@ -40,7 +40,6 @@
                 <th>邮箱</th>
                 <th>邮箱类型</th>
                 <th>项目名称</th>
-                <th>项目编码</th>
                 {% if billing_on %}<th>单价</th><th>计费状态</th>{% else %}<th>邮箱状态</th>{% endif %}
                 <th>获取时间</th>
                 <th>最新收件</th>
@@ -113,7 +112,14 @@
         </div>
     </div>
     {% else %}
-    <div class="empty">暂无下单流水，可到「购买邮箱」商城取号</div>
+    <div class="empty">
+            {% if billing_on %}
+            还没有取号记录，去<a href="/app/buy-email">选择项目</a>开始
+            {% else %}
+            当前未接入计费，不产生订单记录。<br>
+            取号完全免费，<a href="/app/buy-email">直接去选择项目</a>即可
+            {% endif %}
+        </div>
     {% endif %}
 </div>
 {% endblock %}

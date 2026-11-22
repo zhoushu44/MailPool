@@ -906,9 +906,18 @@ async fn orders_page(
     let uid = identity.user_id.unwrap_or(0);
     let offset = (page - 1) * page_size;
 
-    // 计费关闭 + 非管理员：看不到「自己的」记录，直接回商城（303，与 Python 一致）
+    // 计费关闭 + 非管理员：这个用户没有「自己的订单」可言。
+    //
+    // 原来直接 303 回商城，但跳转目标是旧路径 `/buy-email`，
+    // 浏览器再跟一次 301 才到 `/app/buy-email` —— 用户看到的是
+    // 「点订单进到了购买页」，像是页面串了。
+    //
+    // 现在改成渲染一个说明页：告诉用户当前未接入计费、没有订单记录，
+    // 并给一个回商城的按钮。比无声跳转清楚，也不用多改一个模板。
     if !billing_on && !is_admin {
-        return Ok(Redirect::to("/buy-email").into_response());
+        let mut ctx = customer_ctx(&identity, false, "orders");
+        ctx.insert("billing_on".into(), json!(false));
+        return render_html(&t, "orders.html", &ctx);
     }
 
     let projects = mail::list_projects(&st.pool).await?;

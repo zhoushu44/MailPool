@@ -45,6 +45,26 @@
     {% block content %}{% endblock %}
 </main>
 
+{# 移动端底部标签栏：只在窄屏显示（桌面端由 CSS 隐藏）。
+   顶栏导航在 390px 宽下会被「API 文档 / 退出」挤掉，
+   所以移动端改用拇指可达的底部栏，这是移动端标准做法。 #}
+<nav class="cust-bottomnav">
+    <a href="/app/buy-email" class="cust-bottomnav-item {% if active == 'buy-email' %}active{% endif %}">
+        <span class="cust-bottomnav-ico">◈</span>购买邮箱
+    </a>
+    {% if billing_on %}
+    <a href="/app/orders" class="cust-bottomnav-item {% if active == 'orders' %}active{% endif %}">
+        <span class="cust-bottomnav-ico">▤</span>下单流水
+    </a>
+    {% endif %}
+    <a href="/app/recharges" class="cust-bottomnav-item {% if active == 'recharges' %}active{% endif %}">
+        <span class="cust-bottomnav-ico">◐</span>余额充值
+    </a>
+    <a href="/app/balances" class="cust-bottomnav-item {% if active == 'balances' %}active{% endif %}">
+        <span class="cust-bottomnav-ico">▦</span>费用明细
+    </a>
+</nav>
+
 <footer class="cust-footer">
     <span>MailPool 客户中心</span>
 </footer>

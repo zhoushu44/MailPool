@@ -84,51 +84,66 @@ pub async fn count_claimable(
     Ok(n)
 }
 
-/// **批量版** `count_claimable`：一次算出所有项目的可 claim 数。
+/// 统计各项目「真实可 claim 的邮箱数」。
 ///
-/// 数学等价于「池子总数 − 该项目已用掉且仍在池中的号」：
-/// `available - used_in_pool`，逐项目一致（已用测试校验 53/53 项目零差异）。
+/// ## 为什么不能写成 `基数 - 该项目已用量`
 ///
-/// 返回 `project_code → 数量`。
+/// 这是修掉的一个**真 bug**。原来的实现：
+/// ```text
+/// stock = COUNT(池子里可用的) - COUNT(该项目用过的)
+/// ```
+/// 这个减法只在一个前提下成立：**用过的邮箱都还在池子里**。
+/// 现实是它们会离开池子（健康检查判死、超时回收、退役），于是：
+///
+/// ```text
+/// 生产实测 2026-11-22：
+///   池子可用基数        = 768
+///   chatgpt001 用过      = 780     （其中 85 个已不在池子里）
+///   显示 = 768 - 780     = -12     ← 负数！
+///   真实可 claim         = 55      ← 池子里没被 chatgpt 用过的
+/// ```
+///
+/// 其他项目也都有偏差（aws001 少 2、x001 少 1），只是不像 chatgpt 那么夸张。
+///
+/// ## 正确做法
+///
+/// **直接数「池子里且没被本项目用过的」**，不做减法：
+/// ```sql
+/// SELECT COUNT(*) FROM email_accounts a
+/// WHERE a.provider = ? AND a.pool_status = 'available'
+///   AND a.health_status IN ('healthy','unknown')
+///   AND a.email NOT IN (SELECT email FROM email_usages WHERE project_code = ?)
+/// ```
+///
+/// 用一条 SQL 按项目 GROUP BY 一次算完，避免 53 个项目查 53 次
+/// （995 行 × 53 = 秒级延迟，Python 版注释里也提到过这个坑）。
 pub async fn count_claimable_bulk(
     pool: &SqlitePool,
     provider: &str,
 ) -> AppResult<std::collections::HashMap<String, i64>> {
-    let base: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM email_accounts \
-         WHERE provider = ? AND pool_status = 'available' \
-           AND health_status IN ('healthy','unknown')",
-    )
-    .bind(provider)
-    .fetch_one(pool)
-    .await?;
-
-    let used: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT u.project_code, COUNT(*) FROM email_usages u \
-         JOIN email_accounts a ON a.email = u.email \
-         WHERE a.provider = ? AND a.pool_status = 'available' \
-           AND a.health_status IN ('healthy','unknown') \
-         GROUP BY u.project_code",
+    // 一次查出所有项目的真实可 claim 数。
+    //
+    // 关键点：`NOT EXISTS` 而不是 `NOT IN` ——
+    // `NOT IN` 在子查询返回 NULL 时会整体变 NULL（SQL 三值逻辑），
+    // 虽然 email 列是 NOT NULL，但用 EXISTS 语义更明确也更快。
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT p.code, \
+                (SELECT COUNT(*) FROM email_accounts a \
+                 WHERE a.provider = p.provider \
+                   AND a.pool_status = 'available' \
+                   AND a.health_status IN ('healthy','unknown') \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM email_usages u \
+                       WHERE u.email = a.email AND u.project_code = p.code \
+                   )) AS claimable \
+         FROM projects p \
+         WHERE p.provider = ? AND p.enabled = 1",
     )
     .bind(provider)
     .fetch_all(pool)
     .await?;
 
-    let used_map: std::collections::HashMap<String, i64> = used.into_iter().collect();
-
-    let codes: Vec<String> =
-        sqlx::query_scalar("SELECT code FROM projects WHERE provider = ? AND enabled = 1")
-            .bind(provider)
-            .fetch_all(pool)
-            .await?;
-
-    Ok(codes
-        .into_iter()
-        .map(|code| {
-            let n = base - used_map.get(&code).copied().unwrap_or(0);
-            (code, n.max(0))
-        })
-        .collect())
+    Ok(rows.into_iter().collect())
 }
 
 /// 健康状态汇总（页面展示用）。
@@ -918,7 +933,9 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_count_matches_single_count() {
-        // 用一个临时库验证「基数 − 已用」与原「NOT IN」逐项目等价
+        // 验证批量版与单项目版 count_claimable 逐项目结果完全一致。
+        // 两个函数必须同源：页面显示用 bulk，实际 claim 用 single，
+        // 口径不一致就会出现「显示有货实际取不到」。
         let dir = std::env::temp_dir().join(format!("mp_bulk_{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&dir).unwrap();
         let pool = crate::db::connect(&dir.join("t.db")).await.unwrap();
@@ -1027,4 +1044,227 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ────────────────────────────────────────────────────────────
+    //  count_claimable_bulk 回归（修掉的「减法」bug）
+    // ────────────────────────────────────────────────────────────
+
+    /// 建一个最小可用的内存库（accounts + usages + projects）。
+    async fn setup_stock_db() -> sqlx::SqlitePool {
+        // 内存库：每个测试独立，互不干扰
+        use std::str::FromStr;
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+
+        sqlx::query(
+            "CREATE TABLE email_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'outlook',
+                pool_status TEXT NOT NULL DEFAULT 'available',
+                health_status TEXT NOT NULL DEFAULT 'healthy'
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE email_usages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                project_code TEXT NOT NULL,
+                first_used_at DATETIME
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL,
+                provider TEXT NOT NULL DEFAULT 'outlook',
+                enabled INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    /// **核心回归：用过的邮箱离开池子后，库存不能被多扣。**
+    ///
+    /// 这正是生产上 chatgpt001 显示 0（实际 55）的原因：
+    /// 旧算法 `base - used_total`，其中 used_total 包含了已经不在池子里的号。
+    #[tokio::test]
+    async fn stock_not_over_subtracted_when_used_accounts_left_pool() {
+        let pool = setup_stock_db().await;
+
+        // 池子里 5 个可用号：a b c d e
+        for e in ["a@x.test", "b@x.test", "c@x.test", "d@x.test", "e@x.test"] {
+            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
+                .bind(e)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // 外加 3 个**已不在池子里**的号（health=dead）
+        for e in ["f@x.test", "g@x.test", "h@x.test"] {
+            sqlx::query(
+                "INSERT INTO email_accounts (email, health_status) VALUES (?, 'dead')",
+            )
+            .bind(e)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sqlx::query("INSERT INTO projects (code) VALUES ('p1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // p1 用过 a、b（还在池子里）和 f、g、h（已经死了）
+        for e in ["a@x.test", "b@x.test", "f@x.test", "g@x.test", "h@x.test"] {
+            sqlx::query("INSERT INTO email_usages (email, project_code) VALUES (?, 'p1')")
+                .bind(e)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        let got = m.get("p1").copied().unwrap_or(-1);
+
+        // 正确：池子 5 个里，a、b 被 p1 用过 → 剩 c、d、e = 3
+        assert_eq!(got, 3, "真实可 claim 应为 3（c/d/e）");
+
+        // 旧错误算法会算成：base(5) - used_total(5) = 0 ← 明显错
+        assert_ne!(got, 0, "不能被已离开池子的号多扣（这就是生产上的 bug）");
+    }
+
+    /// 全新项目：池子里的号全都能用。
+    #[tokio::test]
+    async fn stock_full_for_unused_project() {
+        let pool = setup_stock_db().await;
+        for e in ["a@x.test", "b@x.test", "c@x.test"] {
+            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
+                .bind(e)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO projects (code) VALUES ('fresh')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        assert_eq!(m.get("fresh").copied().unwrap(), 3);
+    }
+
+    /// 多个项目互相独立：p1 用过 a，p2 仍能用 a。
+    #[tokio::test]
+    async fn stock_is_per_project_independent() {
+        let pool = setup_stock_db().await;
+        for e in ["a@x.test", "b@x.test"] {
+            sqlx::query("INSERT INTO email_accounts (email) VALUES (?)")
+                .bind(e)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for c in ["p1", "p2"] {
+            sqlx::query("INSERT INTO projects (code) VALUES (?)")
+                .bind(c)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("INSERT INTO email_usages (email, project_code) VALUES ('a@x.test', 'p1')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        assert_eq!(m.get("p1").copied().unwrap(), 1, "p1 只剩 b");
+        assert_eq!(m.get("p2").copied().unwrap(), 2, "p2 两个都能用");
+    }
+
+    /// 库存永不为负（旧算法在 chatgpt001 上算出 -12）。
+    #[tokio::test]
+    async fn stock_never_negative() {
+        let pool = setup_stock_db().await;
+        sqlx::query("INSERT INTO email_accounts (email) VALUES ('only@x.test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (code) VALUES ('hungry')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        // 用过 10 个（其中 9 个是已消失的号）
+        for i in 0..10 {
+            sqlx::query("INSERT INTO email_usages (email, project_code) VALUES (?, 'hungry')")
+                .bind(format!("gone{i}@x.test"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        assert_eq!(m.get("hungry").copied().unwrap(), 1, "只剩唯一那个可用号");
+    }
+
+    /// 死了的号不算库存。
+    #[tokio::test]
+    async fn stock_excludes_dead_accounts() {
+        let pool = setup_stock_db().await;
+        sqlx::query("INSERT INTO email_accounts (email) VALUES ('ok@x.test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO email_accounts (email, health_status) VALUES ('dead@x.test', 'dead')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO projects (code) VALUES ('p')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        assert_eq!(m.get("p").copied().unwrap(), 1, "只算 healthy 的");
+    }
+
+    /// 停用的项目不出现在结果里。
+    #[tokio::test]
+    async fn disabled_projects_excluded() {
+        let pool = setup_stock_db().await;
+        sqlx::query("INSERT INTO email_accounts (email) VALUES ('a@x.test')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (code, enabled) VALUES ('on', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO projects (code, enabled) VALUES ('off', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let m = count_claimable_bulk(&pool, "outlook").await.unwrap();
+        assert!(m.contains_key("on"));
+        assert!(!m.contains_key("off"), "停用项目不该出现");
+    }
+
 }

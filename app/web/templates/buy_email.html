@@ -1,196 +1,117 @@
 {% extends "base_customer.html" %}
-{% block title %}购买邮箱{% endblock %}
+{% block title %}选择项目{% endblock %}
 {% block content %}
 <div class="mn-list-head">
     <div>
-        <div class="page-title">购买邮箱</div>
-        <div class="page-sub">从 Outlook 号池按项目取号，收到验证码才完成使用</div>
+        <div class="page-title">选择项目</div>
+        <div class="page-sub">
+            {% if billing_on %}
+            选好项目拿到邮箱，收到验证码后才扣费
+            {% else %}
+            选好项目拿到邮箱，收到验证码即完成
+            {% endif %}
+        </div>
     </div>
 </div>
 
-<div class="mn-tabs">
-    <button type="button" class="mn-tab active" onclick="switchTab('temp', this)">邮箱购买</button>
-    <button type="button" class="mn-tab" onclick="switchTab('exclusive', this)">独占邮箱</button>
+{# 三步流程提示：对齐 MailNest 首页的「三步完成一次邮箱验证」，
+   比原来那一大段技术说明更容易理解。
+   技术细节（域名过滤/正文过滤）移到 docs，客户不需要看。 #}
+<div class="cust-steps">
+    <div class="cust-step">
+        <span class="cust-step-num">1</span>
+        <div class="cust-step-body">
+            <div class="cust-step-title">选择项目</div>
+            <div class="cust-step-desc">选中你要注册的平台</div>
+        </div>
+    </div>
+    <div class="cust-step">
+        <span class="cust-step-num">2</span>
+        <div class="cust-step-body">
+            <div class="cust-step-title">获取邮箱</div>
+            <div class="cust-step-desc">{% if billing_on %}冻结单价后立即分配{% else %}立即分配一个 Outlook 邮箱{% endif %}</div>
+        </div>
+    </div>
+    <div class="cust-step">
+        <span class="cust-step-num">3</span>
+        <div class="cust-step-body">
+            <div class="cust-step-title">等待验证码</div>
+            <div class="cust-step-desc">自动解析邮件里的验证码</div>
+        </div>
+    </div>
 </div>
 
-<div id="tab-temp">
-    <div class="mn-mall-note">邮箱来自私有 Outlook 号池：取号即绑定当前项目，本项目用过的邮箱不会再发给你，释放后回池供其他项目使用。系统会按规则过滤邮件：当发件域名命中对应域名关键词，或邮件正文包含任意一个配置的关键词时，即判定该邮件属于对应项目并返回。若没有你需要的项目，可以点击「联系我们」申请项目。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}</div>
-
-    {% if projects %}
-    <div class="mn-mall-list">
-        {% for p in projects %}
-        <div class="mn-mall-card">
-            <div class="mn-mall-main">
-                <div class="mn-mall-info">
-                    <div class="mn-mall-name">{{ p.name or p.code }}</div>
-                    <div class="mn-mall-code">项目代码: <span class="mono">{{ p.code }}</span></div>
-                    <div class="mn-mall-row">
-                        <span>有效期: {% if p.card_duration and p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟{% elif p.card_duration and p.card_duration|int > 0 %}{{ p.card_duration }} 秒{% else %}—{% endif %}</span>
-                        <span>库存: {% if p.available is not none %}{{ p.available }}{% else %}充足{% endif %}</span>
-                    </div>
-                    <div class="mn-mall-row">
-                        <span>域名过滤: {{ p.card_query or '—' }}</span>
-                        <span>正文过滤: {{ p.card_keywords or '—' }}</span>
-                    </div>
-                </div>
-                {% if p.logo_src %}
-                <img class="mn-mall-logo" src="{{ p.logo_src }}" alt="">
-                {% else %}
-                <div class="mn-mall-logo project-logo-fallback">{{ p.name[:1] }}</div>
-                {% endif %}
-            </div>
-            <div class="mn-mall-foot">
-                <div class="mn-mall-price">
-                    {% if billing_on %}
-                    <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
-                    <div class="mn-mall-price-origin">{% if p.card_original_price %}￥{{ p.card_original_price }}{% else %}—{% endif %}</div>
-                    {% else %}
-                    <div class="mn-mall-price-now">免费</div>
-                    <div class="mn-mall-price-origin">¥0.0000</div>
+{% if projects %}
+<div class="mn-mall-list">
+    {% for p in projects %}
+    <div class="mn-mall-card">
+        <div class="mn-mall-main">
+            <div class="mn-mall-info">
+                <div class="mn-mall-name">{{ p.name or p.code }}</div>
+                <div class="mn-mall-row">
+                    {# 「库存」改成「可用」：这个数字是共享池里本项目还能取的量，
+                       叫「库存」会被理解成独占数量 #}
+                    <span class="mn-mall-avail">
+                        {% if p.available is not none %}
+                            {% if p.available > 0 %}可用 {{ p.available }}{% else %}<span class="mn-mall-out">暂时缺货</span>{% endif %}
+                        {% else %}可用{% endif %}
+                    </span>
+                    {% if p.card_duration and p.card_duration|int > 0 %}
+                    <span class="mn-mall-dur">{% if p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟有效{% else %}{{ p.card_duration }} 秒有效{% endif %}</span>
                     {% endif %}
                 </div>
-                <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
             </div>
+            {% if p.logo_src %}
+            <img class="mn-mall-logo" src="{{ p.logo_src }}" alt="">
+            {% else %}
+            <div class="mn-mall-logo project-logo-fallback">{{ p.name[:1] }}</div>
+            {% endif %}
         </div>
-        {% endfor %}
-    </div>
-    {% else %}
-    <div class="card"><div class="empty">暂无项目，请先到「项目」页创建</div></div>
-    {% endif %}
-</div>
-
-<div id="tab-exclusive" style="display:none">
-    <div class="mn-mall-note">独占邮箱可以接收一切邮件。{% if billing_on %}取号时冻结单价，收到验证码才实扣。{% else %}未接入计费，购买即取号，完全免费。{% endif %}选择项目后取号，邮箱将归您使用。</div>
-    {% if projects %}
-    <div class="mn-mall-list">
-        {% for p in projects %}
-        <div class="mn-mall-card">
-            <div class="mn-mall-main">
-                <div class="mn-mall-info">
-                    <div class="mn-mall-name">{{ p.name or p.code }}</div>
-                    <div class="mn-mall-code">项目代码: <span class="mono">{{ p.code }}</span></div>
-                    <div class="mn-mall-row">
-                        <span>有效期: {% if p.card_duration and p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟{% elif p.card_duration and p.card_duration|int > 0 %}{{ p.card_duration }} 秒{% else %}—{% endif %}</span>
-                        <span>库存: {% if p.available is not none %}{{ p.available }}{% else %}充足{% endif %}</span>
-                    </div>
-                    <div class="mn-mall-row">
-                        <span>域名过滤: {{ p.card_query or '—' }}</span>
-                        <span>正文过滤: {{ p.card_keywords or '—' }}</span>
-                    </div>
-                </div>
-                {% if p.logo_src %}
-                <img class="mn-mall-logo" src="{{ p.logo_src }}" alt="">
+        <div class="mn-mall-foot">
+            <div class="mn-mall-price">
+                {% if billing_on %}
+                <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
+                {% if p.card_original_price %}
+                <div class="mn-mall-price-origin">￥{{ p.card_original_price }}</div>
+                {% endif %}
                 {% else %}
-                <div class="mn-mall-logo project-logo-fallback">{{ p.name[:1] }}</div>
+                {# 计费关闭时只显示「免费」，不再跟一个自相矛盾的 ￥0.0000 #}
+                <div class="mn-mall-price-now mn-mall-free">免费</div>
                 {% endif %}
             </div>
-            <div class="mn-mall-foot">
-                <div class="mn-mall-price">
-                    {% if billing_on %}
-                    <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
-                    <div class="mn-mall-price-origin">{% if p.card_original_price %}￥{{ p.card_original_price }}{% else %}—{% endif %}</div>
-                    {% else %}
-                    <div class="mn-mall-price-now">免费</div>
-                    <div class="mn-mall-price-origin">¥0.0000</div>
-                    {% endif %}
-                </div>
-                <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %} onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}购买{% else %}停用{% endif %}</button>
-            </div>
+            <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %}
+                    onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}获取邮箱{% else %}停用{% endif %}</button>
         </div>
-        {% endfor %}
     </div>
-    {% else %}
-    <div class="card"><div class="empty">暂无项目，请先到「项目」页创建</div></div>
-    {% endif %}
+    {% endfor %}
 </div>
+{% else %}
+<div class="card"><div class="empty">暂无可用项目</div></div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
 <script>
-function switchTab(name, el) {
-    document.querySelectorAll('.mn-tab').forEach(t => t.classList.remove('active'));
-    el.classList.add('active');
-    document.getElementById('tab-temp').style.display = name === 'temp' ? '' : 'none';
-    document.getElementById('tab-exclusive').style.display = name === 'exclusive' ? '' : 'none';
-}
-
-const BUY_ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
-function buyEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => BUY_ESC[c]); }
-
-async function buyEmail(projectCode) {
-    if (!confirm('确认购买（取号）项目 ' + projectCode + '？')) return;
+async function buyEmail(code) {
+    const btns = document.querySelectorAll('.mn-mall-buy');
+    btns.forEach(b => b.disabled = true);
     try {
-        const res = await api('/api/v1/email/temporary/buy', {
+        const r = await api('/api/v1/email/temporary/buy', {
             method: 'POST',
-            body: JSON.stringify({ project_code: projectCode, count: 1 }),
+            body: JSON.stringify({ project_code: code })
         });
-        // MailNest 格式：code=00000 成功；D0001 余额不足等
-        if (res.code && res.code !== '00000') { toast(res.msg || '取号失败', 'error'); return; }
-        const item = Array.isArray(res.data) ? res.data[0] : res.data;
-        const email = item && (item.email || item.address) || '';
-        if (!email) { toast('取号返回为空', 'error'); return; }
-        toast('取号成功：' + email, 'success');
-        openWaitCode(email, projectCode);
-    } catch (err) {
-        toast(err.message, 'error');
-    }
-}
-
-// ── 取号成功后的收码等待弹窗（客户不下商城页，直接等码）──
-let _waitTimer = null;
-function closeWaitCode() {
-    if (_waitTimer) { clearTimeout(_waitTimer); _waitTimer = null; }
-    document.getElementById('mn-wait-mask').style.display = 'none';
-}
-
-function openWaitCode(email, projectCode) {
-    document.getElementById('mn-wait-email').textContent = email;
-    document.getElementById('mn-wait-code').textContent = '';
-    document.getElementById('mn-wait-status').textContent = '正在等待验证码，每 5 秒自动查询一次（最长 90 秒）…';
-    document.getElementById('mn-wait-copy').style.display = 'none';
-    document.getElementById('mn-wait-mask').style.display = 'flex';
-    const startedAt = Date.now();
-    const poll = async () => {
-        try {
-            const res = await api('/api/v1/email/receive', {
-                method: 'POST',
-                body: JSON.stringify({ project_code: projectCode, email, timeout: 5 }),
-            });
-            if (res.code === '00000' && res.data && res.data.status === 'success' && res.data.code) {
-                document.getElementById('mn-wait-code').textContent = res.data.code;
-                document.getElementById('mn-wait-status').textContent = '收到验证码！';
-                document.getElementById('mn-wait-copy').style.display = '';
-                return;
-            }
-            if (Date.now() - startedAt > 90000) {
-                document.getElementById('mn-wait-status').textContent = '等待超时。验证码可能稍后到达，可稍后再来订单流水查看，或直接重新查询。';
-                return;
-            }
-        } catch (e) { /* 网络抖动继续轮询 */ }
-        _waitTimer = setTimeout(poll, 5000);
-    };
-    poll();
-}
-
-function copyWaitCode() {
-    const code = document.getElementById('mn-wait-code').textContent;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(code).then(() => toast('验证码已复制', 'success')).catch(() => {});
+        if (r.code === '00000' && r.data && r.data.email) {
+            // 直接进收件页（带项目与邮箱），省掉「再点一次去看邮件」
+            location.href = '/app/mailbox?project_code=' + encodeURIComponent(code)
+                          + '&email=' + encodeURIComponent(r.data.email);
+            return;
+        }
+        toast(r.msg || '获取失败', 'error');
+    } catch (e) {
+        toast('获取失败：' + e.message, 'error');
+    } finally {
+        btns.forEach(b => b.disabled = false);
     }
 }
 </script>
-
-<!-- ── 收码等待弹窗 ── -->
-<div id="mn-wait-mask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1000;align-items:center;justify-content:center" onclick="if(event.target===this)closeWaitCode()">
-    <div style="background:var(--card,#fff);color:inherit;border-radius:12px;box-shadow:0 20px 60px rgba(0,0,0,.3);width:min(460px,92vw);max-height:90vh;overflow:auto;padding:20px 22px;text-align:center" onclick="event.stopPropagation()">
-        <div style="font-size:18px;font-weight:600;margin-bottom:6px">等待验证码</div>
-        <div id="mn-wait-email" class="mono" style="font-size:14px;color:var(--muted,#64748b);word-break:break-all"></div>
-        <div id="mn-wait-code" class="mono" style="font-size:34px;font-weight:700;letter-spacing:.14em;margin:18px 0 6px;min-height:44px"></div>
-        <div id="mn-wait-status" style="font-size:13px;color:var(--muted,#64748b)"></div>
-        <div style="display:flex;justify-content:center;gap:10px;margin-top:16px">
-            <button id="mn-wait-copy" class="btn" style="display:none" onclick="copyWaitCode()">复制验证码</button>
-            <button class="btn btn-ghost" onclick="closeWaitCode()">关闭</button>
-        </div>
-    </div>
-</div>
 {% endblock %}
