@@ -2,7 +2,7 @@
 name = "mailpool"
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.94"
 description = "MailPool — Outlook 邮箱池 / 取号收码服务（Rust 重写）"
 license = "MIT"
 
@@ -76,12 +76,23 @@ thiserror = "2"
 anyhow = "1"
 dotenvy = "0.15"
 
+# ── 邮箱注册：SMTP 发信 ──
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls", "builder", "hostname", "rustls-native-certs", "ring"] }
+argon2 = "0.5"
+
+# ── S3 备份 ──
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "rustls"] }
+flate2 = "1"
+tempfile = "3"
+chacha20poly1305 = "0.10"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
 
 [dev-dependencies]
 tokio-test = "0.4"

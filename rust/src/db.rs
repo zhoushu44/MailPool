@@ -205,6 +205,52 @@ CREATE TABLE IF NOT EXISTS email_orders (
     CONSTRAINT uq_email_order_project UNIQUE (email, project_code)
 );
 CREATE INDEX IF NOT EXISTS ix_email_orders_user_billing ON email_orders (user_id, billing_status);
+
+-- ────────────────────────────────────────────────────────────────
+--  邮箱注册：验证码（落库，不存内存）
+-- ────────────────────────────────────────────────────────────────
+--  为什么不照抄 new-api 的进程内 RAM map：
+--    - 多实例部署直接失效（请求落到别的节点就"验证码错误"）
+--    - 进程重启丢失（用户点了发送，服务重启就白点）
+--    - 无法审计（谁在什么时候要过码，事后查不到）
+--
+--  存的是 HMAC-SHA256 而不是明文码：库文件泄露时攻击者拿不到可用验证码。
+--  用 HMAC 而不是 Argon2：6 位码只有 100 万种可能，Argon2 每次 20ms 会
+--  把发码接口打成 DoS；真正的防线是「尝试次数上限 + 短有效期」。
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email VARCHAR(254) NOT NULL,
+    code_hash VARCHAR(64) NOT NULL,
+    purpose VARCHAR(16) NOT NULL DEFAULT 'register',
+    -- 尝试次数：超过上限直接作废，防爆破
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 5,
+    -- 有效期（分钟级）：注册码 10 分钟
+    expires_at DATETIME NOT NULL,
+    -- 用过即删（consumed=1 后保留一小会儿用于审计，定时清理）
+    consumed INTEGER NOT NULL DEFAULT 0,
+    consumed_at DATETIME,
+    client_ip VARCHAR(64) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_evc_email_purpose ON email_verification_codes (email, purpose);
+CREATE INDEX IF NOT EXISTS ix_evc_expires ON email_verification_codes (expires_at);
+
+-- ────────────────────────────────────────────────────────────────
+--  邮箱注册：发信限流（IP + 邮箱 双维度）
+-- ────────────────────────────────────────────────────────────────
+--  new-api 只按 IP 限流（2 次/30 秒），换个邮箱就能无限发 —— 这是个洞。
+--  这里两个维度都记：同一 IP 不能刷量，同一邮箱不能被反复轰炸。
+CREATE TABLE IF NOT EXISTS email_send_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email VARCHAR(254) NOT NULL DEFAULT '',
+    client_ip VARCHAR(64) NOT NULL DEFAULT '',
+    purpose VARCHAR(16) NOT NULL DEFAULT 'register',
+    ok INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_esl_email_time ON email_send_log (email, created_at);
+CREATE INDEX IF NOT EXISTS ix_esl_ip_time ON email_send_log (client_ip, created_at);
 "#;
 
 /// 打开数据库连接池。
@@ -265,6 +311,11 @@ async fn migrate_add_columns(pool: &SqlitePool) -> anyhow::Result<()> {
         ("mail_records", "folder", "VARCHAR(64) DEFAULT ''"),
         ("mail_records", "body_preview", "TEXT DEFAULT ''"),
         ("mail_records", "code_source", "VARCHAR(16) DEFAULT ''"),
+        // 邮箱注册：验证时间戳（NULL = 未验证）
+        // new-api 全仓没有这个字段，靠应用层锁保证邮箱唯一 —— 结果就是
+        // 无法区分「注册时填了邮箱」和「邮箱真的验证过」。
+        ("users", "email_verified_at", "DATETIME"),
+        ("users", "username_norm", "VARCHAR(64) DEFAULT ''"),
     ];
 
     for (table, column, definition) in COLS {

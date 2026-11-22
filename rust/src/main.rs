@@ -64,6 +64,8 @@ pub async fn build_app(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(public_api)
         .merge(api::recharge::router())
+        .merge(api::auth::router())
+        .merge(api::backup::router())
         .merge(api::admin::router())
         .merge(web::pages::router(state.templates.clone()))
         // 静态资源

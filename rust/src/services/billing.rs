@@ -30,19 +30,22 @@ pub async fn get_user(pool: &SqlitePool, user_id: i64) -> AppResult<Option<User>
     if user_id == 0 {
         return Ok(None);
     }
-    Ok(sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+    // 用手工 from_row 而不是 query_as::<_, User>：生产库 users.role 列
+    // 声明是 INTEGER 但实际存了 'admin' 这样的文本，sqlx 严格解码会 500。
+    // 详见 models.rs 的 User::from_row。
+    let row = sqlx::query("SELECT * FROM users WHERE id = ?")
         .bind(user_id)
         .fetch_optional(pool)
-        .await?)
+        .await?;
+    Ok(row.as_ref().map(User::from_row))
 }
 
 pub async fn get_user_by_name(pool: &SqlitePool, username: &str) -> AppResult<Option<User>> {
-    Ok(
-        sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
-            .bind(username)
-            .fetch_optional(pool)
-            .await?,
-    )
+    let row = sqlx::query("SELECT * FROM users WHERE username = ?")
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.as_ref().map(User::from_row))
 }
 
 pub async fn get_user_by_id_strict(pool: &SqlitePool, user_id: i64) -> AppResult<User> {
@@ -59,12 +62,12 @@ pub async fn list_users(
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(pool)
         .await?;
-    let rows = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY id ASC LIMIT ? OFFSET ?")
+    let rows = sqlx::query("SELECT * FROM users ORDER BY id ASC LIMIT ? OFFSET ?")
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
         .await?;
-    Ok((rows, total))
+    Ok((rows.iter().map(User::from_row).collect(), total))
 }
 
 // ────────────────────────────────────────────────────────────────

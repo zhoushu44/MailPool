@@ -222,27 +222,89 @@ impl MailBaseline {
 }
 
 /// 平台用户（客户）。
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+///
+/// ## `role` 字段为什么要宽松解码
+///
+/// 生产库的真实情况（2026-11-22 实测）：
+/// ```sql
+/// CREATE TABLE users (... role INTEGER NOT NULL ...)   -- 声明是 INTEGER
+/// SELECT role, typeof(role) FROM users;  -->  'admin', 'text'   -- 实际是 TEXT
+/// ```
+///
+/// SQLite 是**动态类型**：列声明只是 affinity，写什么就存什么。历史上有过
+/// `role='admin'` 这样的文本写入，于是同一列里既有整数也有字符串。
+///
+/// Python 用 ORM 读时宽容处理（`"admin"` 当字符串用），Rust 的 sqlx 严格
+/// 解码会直接报 `mismatched types; Rust type i64 is not compatible with
+/// SQL TEXT` —— 整个用户列表接口 500。
+///
+/// 这里改成先按 `Value` 读再归一化：数字直接用，文本按名字映射。
+/// 这样新旧数据都能读，也不需要动生产数据。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: i64,
     pub username: String,
-    #[sqlx(default)]
+    #[serde(default)]
     pub password_hash: String,
-    #[sqlx(default)]
+    #[serde(default)]
     pub role: i64,
-    #[sqlx(default)]
+    #[serde(default)]
     pub status: i64,
-    #[sqlx(default)]
+    #[serde(default)]
     pub email: String,
-    #[sqlx(default)]
+    #[serde(default)]
     pub balance: i64,
-    #[sqlx(default)]
+    #[serde(default)]
     pub frozen_balance: i64,
-    #[sqlx(default)]
+    #[serde(default)]
     pub total_recharged: i64,
-    #[sqlx(default)]
+    #[serde(default)]
     pub total_charged: i64,
     pub created_at: NaiveDateTime,
+}
+
+impl User {
+    /// 从数据库行构造（`role` / `status` 宽松解析）。
+    ///
+    /// 不用 `#[derive(FromRow)]` 就是为了绕开 role 的类型漂移。
+    pub fn from_row(row: &sqlx::sqlite::SqliteRow) -> Self {
+        use sqlx::Row;
+
+        fn as_i64_loose(row: &sqlx::sqlite::SqliteRow, col: &str, default: i64) -> i64 {
+            // 先试整数
+            if let Ok(v) = row.try_get::<i64, _>(col) {
+                return v;
+            }
+            // 再试文本 → 按名字映射
+            if let Ok(s) = row.try_get::<String, _>(col) {
+                let low = s.trim().to_ascii_lowercase();
+                return match low.as_str() {
+                    "root" => 100,
+                    "admin" => ROLE_ADMIN,
+                    "user" | "common" | "" => ROLE_USER,
+                    other => other.parse().unwrap_or(default),
+                };
+            }
+            // 兜底：可能是 NULL
+            default
+        }
+
+        Self {
+            id: row.try_get("id").unwrap_or(0),
+            username: row.try_get("username").unwrap_or_default(),
+            password_hash: row.try_get("password_hash").unwrap_or_default(),
+            role: as_i64_loose(row, "role", ROLE_USER),
+            status: as_i64_loose(row, "status", 1),
+            email: row.try_get("email").unwrap_or_default(),
+            balance: as_i64_loose(row, "balance", 0),
+            frozen_balance: as_i64_loose(row, "frozen_balance", 0),
+            total_recharged: as_i64_loose(row, "total_recharged", 0),
+            total_charged: as_i64_loose(row, "total_charged", 0),
+            created_at: row
+                .try_get("created_at")
+                .unwrap_or_else(|_| chrono::Local::now().naive_local()),
+        }
+    }
 }
 
 impl User {

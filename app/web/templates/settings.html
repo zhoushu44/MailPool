@@ -2,7 +2,16 @@
 {% block title %}设置{% endblock %}
 {% block content %}
 <div class="page-title">设置</div>
-<div class="page-sub">配置各邮箱源（Provider）的全局参数、管理 API Key</div>
+<div class="page-sub">配置邮箱源、API Key、邮件服务、数据备份</div>
+
+{# Tab 导航：把原来单页堆叠的卡片按功能分组 #}
+<div class="tabs" style="display:flex;gap:4px;border-bottom:1px solid var(--border,#e5e7eb);margin-bottom:20px">
+    <button class="tab-btn tab-active" data-tab="general" onclick="switchTab('general')">常规</button>
+    <button class="tab-btn" data-tab="email" onclick="switchTab('email')">邮件服务</button>
+    <button class="tab-btn" data-tab="backup" onclick="switchTab('backup')">数据备份</button>
+</div>
+
+<div class="tab-panel" data-panel="general">
 
 <div class="card">
     <div class="card-title">API Key 管理
@@ -217,10 +226,437 @@
     {% endif %}
     <div id="refresh-result" style="margin-top:8px"></div>
 </div>
+
+</div>{# /general panel #}
+
+{# ═══════════════════ 邮件服务（SMTP + 注册策略）═══════════════════ #}
+<div class="tab-panel" data-panel="email" style="display:none">
+
+<div class="card">
+    <div class="card-title">邮件服务（SMTP）
+        <span style="flex:1"></span>
+        <button class="btn btn-sm btn-ghost" onclick="testSmtp()">发送测试邮件</button>
+    </div>
+    <div class="page-sub" style="margin-bottom:14px">
+        用于发送注册验证码、换绑邮箱验证等系统邮件。密码留空表示保持原值。
+    </div>
+    <div id="smtp-form" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px">
+        <div style="grid-column:1/-1">
+            <label>SMTP 主机</label>
+            <input type="text" id="smtp-host" placeholder="smtp.example.com">
+            <div class="mn-detail-hint">你的 SMTP 提供商的主机名或 IP</div>
+        </div>
+        <div>
+            <label>端口</label>
+            <input type="number" id="smtp-port" placeholder="587" min="1" max="65535">
+            <div class="mn-detail-hint">常用 25 / 465 / 587</div>
+        </div>
+        <div>
+            <label>加密方式</label>
+            <select id="smtp-encryption">
+                <option value="starttls">STARTTLS（587）</option>
+                <option value="ssl">SSL/TLS（465）</option>
+                <option value="none">无加密（25）</option>
+            </select>
+        </div>
+        <div style="grid-column:1/-1">
+            <label style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="smtp-skip-verify" style="width:auto">
+                跳过 TLS 证书校验（自签名证书时使用）
+            </label>
+        </div>
+        <div style="grid-column:1/-1">
+            <label style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="smtp-force-login" style="width:auto">
+                强制 AUTH LOGIN（部分国产 SMTP 需要）
+            </label>
+        </div>
+        <div style="grid-column:1/-1">
+            <label>用户名</label>
+            <input type="text" id="smtp-username" placeholder="noreply@example.com">
+        </div>
+        <div style="grid-column:1/-1">
+            <label>发件地址</label>
+            <input type="text" id="smtp-from" placeholder="MailPool &lt;noreply@example.com&gt;">
+            <div class="mn-detail-hint">可含显示名；留空则用用户名</div>
+        </div>
+        <div style="grid-column:1/-1">
+            <label>密码 / 访问令牌</label>
+            <input type="password" id="smtp-password" placeholder="留空表示保持原值">
+            <div class="mn-detail-hint" id="smtp-password-hint"></div>
+        </div>
+    </div>
+    <div style="margin-top:16px;display:flex;gap:10px">
+        <button class="btn" onclick="saveSmtp()">保存邮件配置</button>
+    </div>
+    <div id="smtp-result" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">注册与邮箱策略</div>
+    <div class="page-sub" style="margin-bottom:14px">
+        控制用户能否自助注册、注册时是否必须验证邮箱。
+    </div>
+    <div id="reg-form" style="display:grid;gap:14px">
+        <label style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="reg-allow" style="width:auto">
+            允许新用户注册
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="reg-password-login" style="width:auto">
+            允许密码登录
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="reg-require-verify" style="width:auto">
+            注册时强制验证邮箱（需先配好 SMTP）
+        </label>
+        <label style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="reg-domain-restriction" style="width:auto">
+            启用邮箱域名白名单
+        </label>
+        <div>
+            <label>邮箱域名白名单</label>
+            <textarea id="reg-domain-whitelist" rows="4" placeholder="example.com&#10;company.com"
+                      style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace"></textarea>
+            <div class="mn-detail-hint">每行一个域名，仅在启用域名限制时生效</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px">
+            <input type="checkbox" id="reg-alias-restriction" style="width:auto">
+            阻止邮箱别名（user+alias@example.com）
+        </label>
+    </div>
+    <div style="margin-top:16px">
+        <button class="btn" onclick="saveRegPolicy()">保存注册策略</button>
+    </div>
+    <div id="reg-result" style="margin-top:10px"></div>
+</div>
+
+</div>{# /email panel #}
+
+{# ═══════════════════ 数据备份（S3）═══════════════════ #}
+<div class="tab-panel" data-panel="backup" style="display:none">
+
+<div class="card">
+    <div class="card-title">S3 对象存储
+        <span style="flex:1"></span>
+        <button class="btn btn-sm btn-ghost" onclick="testS3()">测试连接</button>
+        <button class="btn btn-sm" onclick="runBackup()">立即备份</button>
+    </div>
+    <div class="page-sub" style="margin-bottom:14px">
+        备份使用 SQLite 在线快照（VACUUM INTO），不锁表、不影响取号。支持 MinIO / 阿里云 OSS / 腾讯云 COS / R2。
+    </div>
+    <div id="s3-form" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px">
+        <div style="grid-column:1/-1">
+            <label style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="s3-enabled" style="width:auto">
+                启用自动备份
+            </label>
+        </div>
+        <div style="grid-column:1/-1">
+            <label>服务端点 Endpoint</label>
+            <input type="text" id="s3-endpoint" placeholder="https://s3.example.com">
+            <div class="mn-detail-hint">留空使用 AWS 官方端点；MinIO 填 http://host:9000</div>
+        </div>
+        <div>
+            <label>存储桶 Bucket</label>
+            <input type="text" id="s3-bucket" placeholder="my-backup-bucket">
+        </div>
+        <div>
+            <label>区域 Region</label>
+            <input type="text" id="s3-region" placeholder="auto">
+            <div class="mn-detail-hint">Cloudflare R2 填 auto</div>
+        </div>
+        <div style="grid-column:1/-1">
+            <label>Access Key ID</label>
+            <input type="text" id="s3-ak" placeholder="AKIA...">
+        </div>
+        <div style="grid-column:1/-1">
+            <label>Secret Access Key</label>
+            <input type="password" id="s3-sk" placeholder="留空表示保持原值">
+            <div class="mn-detail-hint" id="s3-sk-hint"></div>
+        </div>
+        <div>
+            <label>路径前缀</label>
+            <input type="text" id="s3-prefix" placeholder="backups">
+        </div>
+        <div style="display:flex;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:8px">
+                <input type="checkbox" id="s3-path-style" style="width:auto">
+                Force Path Style（MinIO 需要）
+            </label>
+        </div>
+        <div style="grid-column:1/-1">
+            <label>备份加密口令</label>
+            <input type="password" id="s3-passphrase" placeholder="留空 = 不加密（不推荐）">
+            <div class="mn-detail-hint">
+                ChaCha20-Poly1305 客户端加密。<b>口令丢失则备份无法恢复</b>，请单独妥善保存。
+            </div>
+        </div>
+        <div>
+            <label>保留份数</label>
+            <input type="number" id="s3-retain-count" placeholder="10" min="0">
+            <div class="mn-detail-hint">0 = 不按份数清理</div>
+        </div>
+        <div>
+            <label>保留天数</label>
+            <input type="number" id="s3-retain-days" placeholder="14" min="0">
+            <div class="mn-detail-hint">0 = 不按时间清理。与份数是「或」关系</div>
+        </div>
+    </div>
+    <div style="margin-top:16px">
+        <button class="btn" onclick="saveS3()">保存备份配置</button>
+    </div>
+    <div id="s3-result" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">备份记录
+        <span style="flex:1"></span>
+        <button class="btn btn-sm btn-ghost" onclick="loadBackupRecords()">刷新</button>
+    </div>
+    <div class="page-sub" id="backup-status" style="margin-bottom:12px">加载中…</div>
+    <div class="table-wrap">
+        <table>
+            <thead><tr>
+                <th>时间</th><th>文件</th><th>原始</th><th>压缩后</th>
+                <th>加密</th><th>状态</th><th style="width:80px">操作</th>
+            </tr></thead>
+            <tbody id="backup-records"></tbody>
+        </table>
+    </div>
+</div>
+
+</div>{# /backup panel #}
 {% endblock %}
 
 {% block scripts %}
 <script>
+/* ── Tab 切换 ───────────────────────────────────────────────── */
+function switchTab(name) {
+    document.querySelectorAll('.tab-panel').forEach(p => {
+        p.style.display = (p.dataset.panel === name) ? '' : 'none';
+    });
+    document.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.toggle('tab-active', b.dataset.tab === name);
+    });
+    // 按需懒加载：切到备份 tab 才拉记录
+    if (name === 'backup') { loadBackupRecords(); }
+    if (name === 'email') { loadSmtpConfig(); }
+    try { localStorage.setItem('mp_settings_tab', name); } catch (e) {}
+}
+
+/* ── 邮件服务 ───────────────────────────────────────────────── */
+async function loadSmtpConfig() {
+    try {
+        const r = await api('/api/admin/settings/smtp');
+        const s = r.data.smtp || {};
+        const g = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+        const c = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        g('smtp-host', s.host);
+        g('smtp-port', s.port);
+        g('smtp-encryption', s.encryption || 'starttls');
+        g('smtp-username', s.username);
+        g('smtp-from', s.from);
+        c('smtp-skip-verify', s.skip_tls_verify);
+        c('smtp-force-login', s.force_auth_login);
+        document.getElementById('smtp-password-hint').textContent =
+            s.password_set ? '已设置密码（留空则保持原值）' : '尚未设置密码';
+
+        const p = r.data.registration || {};
+        c('reg-allow', p.allow_register);
+        c('reg-password-login', p.allow_password_login);
+        c('reg-require-verify', p.require_email_verify);
+        c('reg-domain-restriction', p.domain_restriction);
+        c('reg-alias-restriction', p.alias_restriction);
+        g('reg-domain-whitelist', p.domain_whitelist);
+    } catch (e) { /* 静默：后台未登录时不该弹窗 */ }
+}
+
+async function saveSmtp() {
+    const body = {
+        host: document.getElementById('smtp-host').value.trim(),
+        port: document.getElementById('smtp-port').value.trim(),
+        encryption: document.getElementById('smtp-encryption').value,
+        username: document.getElementById('smtp-username').value.trim(),
+        from: document.getElementById('smtp-from').value.trim(),
+        skip_tls_verify: document.getElementById('smtp-skip-verify').checked,
+        force_auth_login: document.getElementById('smtp-force-login').checked,
+        password: document.getElementById('smtp-password').value,
+    };
+    try {
+        await api('/api/admin/settings/smtp', { method: 'POST', body: JSON.stringify(body) });
+        document.getElementById('smtp-result').innerHTML = '<span style="color:#16a34a">已保存</span>';
+        document.getElementById('smtp-password').value = '';
+        loadSmtpConfig();
+    } catch (e) {
+        document.getElementById('smtp-result').innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+async function testSmtp() {
+    const box = document.getElementById('smtp-result');
+    box.textContent = '发送中…';
+    try {
+        const r = await api('/api/admin/settings/smtp/test', { method: 'POST', body: JSON.stringify({}) });
+        box.innerHTML = r.code === '00000'
+            ? '<span style="color:#16a34a">' + esc(r.data.message) + '（发往 ' + esc(r.data.to) + '）</span>'
+            : '<span style="color:#dc2626">' + esc(r.msg) + '</span>';
+    } catch (e) { box.innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>'; }
+}
+
+async function saveRegPolicy() {
+    const body = {
+        allow_register: document.getElementById('reg-allow').checked,
+        allow_password_login: document.getElementById('reg-password-login').checked,
+        require_email_verify: document.getElementById('reg-require-verify').checked,
+        domain_restriction: document.getElementById('reg-domain-restriction').checked,
+        alias_restriction: document.getElementById('reg-alias-restriction').checked,
+        domain_whitelist: document.getElementById('reg-domain-whitelist').value,
+    };
+    try {
+        await api('/api/admin/settings/registration', { method: 'POST', body: JSON.stringify(body) });
+        document.getElementById('reg-result').innerHTML = '<span style="color:#16a34a">已保存</span>';
+    } catch (e) {
+        document.getElementById('reg-result').innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+/* ── 数据备份 ───────────────────────────────────────────────── */
+async function loadS3Config() {
+    try {
+        const r = await api('/api/admin/backup/config');
+        const c = r.data.config || {};
+        const g = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+        const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        g('s3-endpoint', c.endpoint);
+        g('s3-bucket', c.bucket);
+        g('s3-region', c.region);
+        g('s3-ak', c.access_key_id);
+        g('s3-prefix', c.prefix);
+        g('s3-retain-count', c.retain_count);
+        g('s3-retain-days', c.retain_days);
+        ck('s3-enabled', c.enabled);
+        ck('s3-path-style', c.force_path_style);
+        document.getElementById('s3-sk-hint').textContent =
+            c.secret_set ? '已设置密钥（留空则保持原值）' : '尚未设置密钥';
+    } catch (e) {}
+}
+
+async function saveS3() {
+    const body = {
+        endpoint: document.getElementById('s3-endpoint').value.trim(),
+        bucket: document.getElementById('s3-bucket').value.trim(),
+        region: document.getElementById('s3-region').value.trim(),
+        access_key_id: document.getElementById('s3-ak').value.trim(),
+        secret_access_key: document.getElementById('s3-sk').value,
+        prefix: document.getElementById('s3-prefix').value.trim(),
+        retain_count: parseInt(document.getElementById('s3-retain-count').value || '10', 10),
+        retain_days: parseInt(document.getElementById('s3-retain-days').value || '14', 10),
+        enabled: document.getElementById('s3-enabled').checked,
+        force_path_style: document.getElementById('s3-path-style').checked,
+        encryption_passphrase: document.getElementById('s3-passphrase').value,
+    };
+    try {
+        await api('/api/admin/backup/config', { method: 'POST', body: JSON.stringify(body) });
+        document.getElementById('s3-result').innerHTML = '<span style="color:#16a34a">已保存</span>';
+        document.getElementById('s3-sk').value = '';
+        loadS3Config();
+    } catch (e) {
+        document.getElementById('s3-result').innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+async function testS3() {
+    const box = document.getElementById('s3-result');
+    box.textContent = '测试中…';
+    try {
+        const r = await api('/api/admin/backup/test', { method: 'POST', body: JSON.stringify({}) });
+        box.innerHTML = r.code === '00000'
+            ? '<span style="color:#16a34a">' + esc(r.data.message) + '</span>'
+            : '<span style="color:#dc2626">' + esc(r.msg) + '</span>';
+    } catch (e) { box.innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>'; }
+}
+
+async function runBackup() {
+    const box = document.getElementById('s3-result');
+    if (!confirm('立即执行一次备份并上传到 S3？')) return;
+    box.textContent = '备份中…';
+    try {
+        const r = await api('/api/admin/backup/run', { method: 'POST', body: JSON.stringify({}) });
+        if (r.code === '00000') {
+            const d = r.data;
+            box.innerHTML = '<span style="color:#16a34a">备份成功：' + esc(d.key)
+                + '（原始 ' + fmtBytes(d.raw_size) + ' → 上传 ' + fmtBytes(d.upload_size)
+                + '，用时 ' + d.duration_ms + 'ms）</span>';
+            loadBackupRecords();
+        } else {
+            box.innerHTML = '<span style="color:#dc2626">' + esc(r.msg) + '</span>';
+        }
+    } catch (e) { box.innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>'; }
+}
+
+async function loadBackupRecords() {
+    try {
+        const r = await api('/api/admin/backup/records?limit=50');
+        const tbody = document.getElementById('backup-records');
+        const items = r.data.items || [];
+        document.getElementById('backup-status').textContent =
+            '共 ' + r.data.total + ' 条记录' + (items.length ? '' : '（还没有备份过）');
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#888">暂无备份</td></tr>';
+            return;
+        }
+        tbody.innerHTML = items.map(function(rec) {
+            var badge = rec.status === 'success'
+                ? '<span class="badge badge-available">成功</span>'
+                : '<span class="badge badge-dead">失败</span>';
+            return '<tr>'
+                + '<td class="mono">' + esc((rec.created_at || '').replace('T', ' ').slice(0, 19)) + '</td>'
+                + '<td class="mono" title="' + esc(rec.key) + '">' + esc(rec.filename) + '</td>'
+                + '<td class="mono">' + fmtBytes(rec.raw_size) + '</td>'
+                + '<td class="mono">' + fmtBytes(rec.gz_size) + '</td>'
+                + '<td>' + (rec.encrypted ? '🔒' : '—') + '</td>'
+                + '<td>' + badge + '</td>'
+                + '<td><button class="btn btn-sm btn-danger" onclick="delBackup(\'' + esc(rec.id) + '\')">删除</button></td>'
+                + '</tr>';
+        }).join('');
+    } catch (e) {
+        document.getElementById('backup-status').textContent = '加载失败：' + e.message;
+    }
+}
+
+async function delBackup(id) {
+    if (!confirm('删除这条备份？（S3 上的对象也会被删除）')) return;
+    try {
+        await api('/api/admin/backup/records/' + encodeURIComponent(id), { method: 'DELETE' });
+        loadBackupRecords();
+    } catch (e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+function fmtBytes(n) {
+    if (n === null || n === undefined) return '—';
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(2) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+}
+
+/* 页面加载：恢复上次 Tab + 预加载配置 */
+(function() {
+    var last = null;
+    try { last = localStorage.getItem('mp_settings_tab'); } catch (e) {}
+    if (last && document.querySelector('.tab-panel[data-panel="' + last + '"]')) {
+        switchTab(last);
+    } else {
+        loadSmtpConfig();
+    }
+})();
 function collectForm(id) {
     const form = document.getElementById('provider-form-' + id);
     const data = {};
