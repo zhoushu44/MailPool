@@ -11,6 +11,7 @@
         <div class="auth-head">
             <h1 class="auth-title">登录</h1>
             <p class="auth-sub">请在下方输入您的用户名和密码登录你的账户</p>
+            <p class="auth-alt">没有账户？<a href="/app/register">注册</a></p>
         </div>
 
         {% if error %}
@@ -78,6 +79,17 @@
     margin: 0;
     line-height: 1.5;
 }
+.auth-alt {
+    font-size: 12.5px;
+    color: var(--nest-muted-foreground, #64748b);
+    margin: 8px 0 0;
+}
+.auth-alt a {
+    color: #2563eb;
+    font-weight: 500;
+    text-decoration: none;
+}
+.auth-alt a:hover { text-decoration: underline; }
 .auth-error {
     background: rgba(239, 68, 68, .08);
     border: 1px solid rgba(239, 68, 68, .2);

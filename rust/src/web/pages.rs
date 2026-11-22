@@ -737,6 +737,21 @@ async fn pool_page(
 
 /// `GET /buy-email` —— 商城：项目卡片按「价格 / 库存 / 过滤规则」展示。
 
+
+/// `GET /app/register` —— 客户注册页。
+///
+/// 后端注册接口早就有（`/api/v1/auth/register` + `/api/v1/auth/send-code`），
+/// 但一直没有页面入口。迈巢的登录页有「没有账户？注册」，我们缺这块。
+async fn app_register_page(
+    State(st): State<Arc<AppState>>,
+    Extension(t): Extension<Arc<Templates>>,
+    identity: Identity,
+) -> AppResult<Response> {
+    let billing_cfg = settings::get_billing_config(&st.pool).await?;
+    let ctx = customer_ctx(&identity, billing_cfg.is_enabled(), "");
+    render_html(&t, "app_register.html", &ctx)
+}
+
 /// `GET /app/mailbox` —— 客户收件页。
 ///
 /// 购买页点「获取邮箱」后跳到这里（带 `?project_code=&email=`），
@@ -936,19 +951,21 @@ async fn orders_page(
     // 浏览器再跟一次 301 才到 `/app/buy-email` —— 用户看到的是
     // 「点订单进到了购买页」，像是页面串了。
     //
-    // 现在改成渲染一个说明页：告诉用户当前未接入计费、没有订单记录，
-    // 并给一个回商城的按钮。比无声跳转清楚，也不用多改一个模板。
-    if !billing_on && !is_admin {
-        let mut ctx = customer_ctx(&identity, false, "orders");
-        ctx.insert("billing_on".into(), json!(false));
-        return render_html(&t, "orders.html", &ctx);
-    }
+    // 注意：**不要**在计费关闭时直接渲染空页。
+    //
+    // 订单 = 取号记录，和「是否计费」是两件事。原来这里直接 return 空状态，
+    // 结果是客户明明取过号、email_orders 里有记录，下单流水却永远显示
+    // 「未接入计费，不产生订单记录」—— 页面等于废的。
+    //
+    // 计费开关只影响「显示单价/计费状态」这些列，不影响要不要列记录。
 
     let projects = mail::list_projects(&st.pool).await?;
 
     // 一次查询同时拿到「本页行 + 总条数」——分页总数就在同一个函数的 COUNT 里，
     // 不要再为拿 total 重复跑一遍同样的两条 SQL（旧写法每次请求多打 2 次全表扫）
-    let (rows, total): (Vec<Value>, i64) = if billing_on {
+    let (rows, total): (Vec<Value>, i64) = if billing_on || !is_admin {
+        // 计费开启 → 完整订单（含单价/计费状态）
+        // 计费关闭 → 同样查订单，只是价格列显示为免费
         let (orders, total) = list_email_orders(
             &st.pool,
             if is_admin { None } else { Some(uid) },
@@ -1093,8 +1110,37 @@ async fn balances_page(
             }));
         }
     } else {
-        let recs = mail::list_mail_records(&st.pool, None, None, None, page_size, offset).await?;
-        total = mail::count_mail_records(&st.pool).await?;
+        // 计费关闭时的「收件流水」。
+        //
+        // ⚠ 必须限定在这个客户自己的邮箱范围内。
+        // 原来直接 `list_mail_records(None, ...)` 拉了全表 ——
+        // 客户能在费用明细里看到**其他所有人**的邮箱和取号记录
+        // （实测 zs 看到 1676 条别人的记录），这是严重的越权泄露。
+        let my_emails: Vec<String> = if is_admin {
+            Vec::new() // 管理员看全部
+        } else {
+            sqlx::query_scalar(
+                "SELECT DISTINCT email FROM email_orders WHERE user_id = ?",
+            )
+            .bind(uid)
+            .fetch_all(&st.pool)
+            .await?
+        };
+
+        let mine_opt: Option<&[String]> = if is_admin { None } else { Some(&my_emails) };
+
+        let recs = mail::list_mail_records(
+            &st.pool, None, None, mine_opt, page_size, offset,
+        )
+        .await?;
+        total = if is_admin {
+            mail::count_mail_records(&st.pool).await?
+        } else if my_emails.is_empty() {
+            0
+        } else {
+            mail::count_mail_records_by_emails(&st.pool, &my_emails).await?
+        };
+
         for r in &recs {
             records.push(json!({
                 "id": r.id,
@@ -1480,6 +1526,7 @@ pub fn router(templates: Arc<Templates>) -> axum::Router<Arc<AppState>> {
         // 而不是误入管理后台的某个页面。两套布局、两套导航、两套退出。
         .route("/app", get(|| async { redirect_302("/app/buy-email") }))
         .route("/app/login", get(user_login_page).post(user_login_submit))
+        .route("/app/register", get(app_register_page))
         .route("/app/logout", get(user_logout))
         .route("/app/buy-email", get(buy_email_page))
         .route("/app/orders", get(orders_page))

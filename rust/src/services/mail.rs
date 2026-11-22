@@ -274,6 +274,28 @@ pub async fn count_mail_records(pool: &SqlitePool) -> AppResult<i64> {
         .await?)
 }
 
+/// 按邮箱集合计数（客户费用明细用）。
+///
+/// 为什么要单独一个函数：客户只能看自己取过的邮箱的收件记录，
+/// 直接 `count_mail_records` 会统计全表（越权）。
+pub async fn count_mail_records_by_emails(
+    pool: &SqlitePool,
+    emails: &[String],
+) -> AppResult<i64> {
+    if emails.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; emails.len()].join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM mail_records WHERE email IN ({placeholders})"
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    for e in emails {
+        q = q.bind(e);
+    }
+    Ok(q.fetch_one(pool).await?)
+}
+
 /// 今天收到的邮件数 / 其中带验证码的数量。
 pub async fn today_stats(pool: &SqlitePool) -> AppResult<(i64, i64)> {
     // 按 UTC 当天（对齐 Python `datetime.now(timezone.utc).date()`）

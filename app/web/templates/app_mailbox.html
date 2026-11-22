@@ -192,6 +192,17 @@ function esc(s) {
 
 (function init() {
     loadEmails().then(() => {
+        // 没指定邮箱时自动选中第一个 —— 否则用户进来看到
+        // 左边有邮箱、右边空白，还得自己点一下。
+        if (!_currentEmail) {
+            const first = document.querySelector('.mb-item-mail');
+            if (first) {
+                _currentEmail = first.innerText.trim();
+                document.querySelectorAll('.mb-item').forEach((el, i) => {
+                    if (i === 0) el.classList.add('active');
+                });
+            }
+        }
         if (_currentEmail) loadMails();
     });
     startPolling();

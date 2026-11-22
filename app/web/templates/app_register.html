@@ -1,0 +1,189 @@
+{% extends "base_customer.html" %}
+{% block title %}注册{% endblock %}
+{% block content %}
+{# 注册页：对齐 MailNest 的居中单卡布局。
+   后端接口早就有了（POST /api/v1/auth/register + /api/v1/auth/send-code），
+   但一直没有页面入口 —— 客户只能登录、不能注册。 #}
+<div class="auth-shell">
+    <div class="auth-card auth-card-wide">
+        <div class="auth-brand">
+            <img src="/static/img/logo.svg" alt="MailPool" class="auth-logo">
+        </div>
+
+        <div class="auth-head">
+            <h1 class="auth-title">创建账户</h1>
+            <p class="auth-sub">已有账户？<a href="/app/login">登录</a></p>
+        </div>
+
+        <div id="regMsg" class="auth-error" style="display:none"></div>
+
+        <form id="regForm" class="auth-form" onsubmit="return doRegister(event)">
+            <div class="auth-field">
+                <label for="username">用户名</label>
+                <input id="username" name="username" type="text" autocomplete="username"
+                       placeholder="3-32 位，字母数字下划线" required autofocus>
+            </div>
+
+            <div class="auth-field">
+                <label for="email">邮箱</label>
+                <div class="auth-email-row">
+                    <input id="email" name="email" type="email" autocomplete="email"
+                           placeholder="you@example.com" required>
+                    <button type="button" class="auth-code-btn" id="sendCodeBtn" onclick="sendCode()">获取验证码</button>
+                </div>
+                <div class="auth-hint" id="codeHint"></div>
+            </div>
+
+            <div class="auth-field">
+                <label for="code">验证码</label>
+                <input id="code" name="code" type="text" inputmode="numeric" maxlength="6"
+                       placeholder="6 位数字" autocomplete="one-time-code">
+            </div>
+
+            <div class="auth-field">
+                <label for="password">密码</label>
+                <div class="auth-pw">
+                    <input id="password" name="password" type="password"
+                           autocomplete="new-password" placeholder="至少 8 位" required>
+                    <button type="button" class="auth-pw-toggle" onclick="togglePw()" tabindex="-1">显示</button>
+                </div>
+            </div>
+
+            <button type="submit" class="auth-submit" id="regBtn">创建账户</button>
+        </form>
+
+        <div class="auth-foot">
+            注册即表示您同意我们的服务条款和隐私政策
+        </div>
+    </div>
+</div>
+
+<style>
+.auth-email-row { display: flex; gap: 8px; }
+.auth-email-row input { flex: 1; min-width: 0; }
+.auth-code-btn {
+    flex: 0 0 auto;
+    height: 38px;
+    padding: 0 14px;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #fff;
+    color: #0f172a;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s;
+}
+.auth-code-btn:hover:not(:disabled) { background: #f8fafc; }
+.auth-code-btn:disabled { opacity: .5; cursor: not-allowed; }
+.auth-hint {
+    font-size: 11.5px;
+    color: #94a3b8;
+    margin-top: 4px;
+    min-height: 15px;
+}
+.auth-card-wide { max-width: 400px; }
+.auth-ok {
+    background: rgba(16,185,129,.08);
+    border: 1px solid rgba(16,185,129,.2);
+    color: #047857;
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    text-align: center;
+}
+</style>
+
+<script>
+let _cdTimer = null;
+
+function showMsg(text, isOk) {
+    const el = document.getElementById('regMsg');
+    el.style.display = 'block';
+    el.className = isOk ? 'auth-ok' : 'auth-error';
+    el.textContent = text;
+}
+
+async function sendCode() {
+    const email = document.getElementById('email').value.trim();
+    if (!email || !email.includes('@')) {
+        showMsg('请先填写正确的邮箱', false);
+        return;
+    }
+    const btn = document.getElementById('sendCodeBtn');
+    btn.disabled = true;
+    btn.textContent = '发送中…';
+    try {
+        const r = await api('/api/v1/auth/send-code', {
+            method: 'POST',
+            body: JSON.stringify({ email: email, purpose: 'register' })
+        });
+        if (r.code === '00000') {
+            document.getElementById('codeHint').textContent = '验证码已发送，10 分钟内有效';
+            // 60 秒倒计时，防止连点
+            let n = 60;
+            btn.textContent = n + 's';
+            _cdTimer = setInterval(() => {
+                n--;
+                if (n <= 0) {
+                    clearInterval(_cdTimer);
+                    btn.disabled = false;
+                    btn.textContent = '重新发送';
+                } else {
+                    btn.textContent = n + 's';
+                }
+            }, 1000);
+        } else {
+            showMsg(r.msg || '发送失败', false);
+            btn.disabled = false;
+            btn.textContent = '获取验证码';
+        }
+    } catch (e) {
+        showMsg('发送失败：' + e.message, false);
+        btn.disabled = false;
+        btn.textContent = '获取验证码';
+    }
+}
+
+async function doRegister(ev) {
+    ev.preventDefault();
+    const btn = document.getElementById('regBtn');
+    btn.disabled = true;
+    btn.textContent = '创建中…';
+    const body = {
+        username: document.getElementById('username').value.trim(),
+        email: document.getElementById('email').value.trim(),
+        password: document.getElementById('password').value,
+        code: document.getElementById('code').value.trim(),
+    };
+    try {
+        const r = await api('/api/v1/auth/register', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        if (r.code === '00000') {
+            showMsg('注册成功，正在跳转登录…', true);
+            setTimeout(() => { location.href = '/app/login'; }, 1200);
+        } else {
+            showMsg(r.msg || '注册失败', false);
+            btn.disabled = false;
+            btn.textContent = '创建账户';
+        }
+    } catch (e) {
+        showMsg('注册失败：' + e.message, false);
+        btn.disabled = false;
+        btn.textContent = '创建账户';
+    }
+    return false;
+}
+
+function togglePw() {
+    const i = document.getElementById('password');
+    const b = document.querySelector('.auth-pw-toggle');
+    if (i.type === 'password') { i.type = 'text'; b.textContent = '隐藏'; }
+    else { i.type = 'password'; b.textContent = '显示'; }
+}
+</script>
+{% endblock %}
