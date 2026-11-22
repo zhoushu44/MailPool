@@ -1,0 +1,216 @@
+/* ═══════════════════════════════════════════════════════════════
+   客户中心布局（顶部导航 + 居中内容）
+   ───────────────────────────────────────────────────────────────
+   与后台（admin.css）刻意做出视觉差异：
+   - 浅色、留白多、圆角大、内容居中
+   - 品牌色更明快，不像后台那样深色压抑
+
+   客户进来是来买号/充值的，界面要松弛，不要管理后台那种密度。
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+    --cust-primary: #2563eb;
+    --cust-primary-hover: #1d4ed8;
+    --cust-bg: #f7f9fc;
+    --cust-border: #e6ebf3;
+    --cust-text: #1e293b;
+    --cust-muted: #64748b;
+}
+
+.customer-view {
+    background: var(--cust-bg);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── 顶部导航 ── */
+.cust-header {
+    background: #fff;
+    border-bottom: 1px solid var(--cust-border);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+}
+.cust-header-inner {
+    max-width: 1120px;
+    margin: 0 auto;
+    padding: 0 24px;
+    height: 62px;
+    display: flex;
+    align-items: center;
+    gap: 28px;
+}
+
+.cust-brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    text-decoration: none;
+    color: var(--cust-text);
+    flex-shrink: 0;
+}
+.cust-brand:hover { text-decoration: none; }
+.cust-brand .brand-mark { width: 26px; height: 26px; }
+.cust-brand-text {
+    display: flex;
+    flex-direction: column;
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: .2px;
+}
+.cust-brand-text .brand-sub {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--cust-muted);
+    letter-spacing: 0;
+}
+
+.cust-nav {
+    display: flex;
+    gap: 4px;
+    flex: 1;
+}
+.cust-nav-item {
+    padding: 8px 14px;
+    border-radius: 8px;
+    font-size: 14px;
+    color: var(--cust-muted);
+    text-decoration: none;
+    transition: background .12s, color .12s;
+    white-space: nowrap;
+}
+.cust-nav-item:hover {
+    background: #f1f5f9;
+    color: var(--cust-text);
+    text-decoration: none;
+}
+.cust-nav-item.active {
+    background: #eff6ff;
+    color: var(--cust-primary);
+    font-weight: 600;
+}
+
+.cust-header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+.cust-user {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13.5px;
+    color: var(--cust-text);
+    padding: 5px 10px 5px 5px;
+    border-radius: 20px;
+    background: #f1f5f9;
+}
+.cust-user-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: var(--cust-primary);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* ── 内容区 ── */
+.cust-content {
+    flex: 1;
+    max-width: 1120px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 28px 24px 48px;
+}
+
+.cust-content .page-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--cust-text);
+    margin-bottom: 6px;
+    letter-spacing: -.01em;
+}
+.cust-content .page-sub {
+    font-size: 14px;
+    color: var(--cust-muted);
+    margin-bottom: 24px;
+    line-height: 1.6;
+}
+
+/* 客户页卡片：更大圆角、更松的间距 */
+.cust-content .card {
+    background: #fff;
+    border: 1px solid var(--cust-border);
+    border-radius: 14px;
+    padding: 24px 26px;
+    margin-bottom: 18px;
+    box-shadow: 0 1px 2px rgba(16, 24, 40, .04);
+}
+.cust-content .card-title {
+    font-size: 16px;
+    font-weight: 650;
+    color: var(--cust-text);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* 客户页按钮更醒目 */
+.cust-content .btn {
+    border-radius: 9px;
+    font-weight: 550;
+    padding: 9px 18px;
+}
+.cust-content .btn:not(.btn-ghost):not(.btn-sm) {
+    background: var(--cust-primary);
+    border-color: var(--cust-primary);
+    color: #fff;
+}
+.cust-content .btn:not(.btn-ghost):not(.btn-sm):hover {
+    background: var(--cust-primary-hover);
+    border-color: var(--cust-primary-hover);
+}
+
+/* 表格在客户页更宽松 */
+.cust-content table { font-size: 14px; }
+.cust-content th {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--cust-muted);
+    font-weight: 600;
+}
+
+/* ── 页脚 ── */
+.cust-footer {
+    border-top: 1px solid var(--cust-border);
+    padding: 18px 24px;
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--cust-muted);
+    background: #fff;
+}
+
+/* ── 窄屏 ── */
+@media (max-width: 820px) {
+    .cust-header-inner {
+        height: auto;
+        padding: 10px 14px;
+        flex-wrap: wrap;
+        gap: 10px;
+    }
+    .cust-nav { order: 3; width: 100%; overflow-x: auto; }
+    .cust-nav-item { padding: 7px 11px; font-size: 13px; }
+    .cust-header-right { margin-left: auto; }
+    .cust-user span:last-child { display: none; }
+    .cust-content { padding: 18px 14px 36px; }
+    .cust-content .page-title { font-size: 20px; }
+    .cust-content .card { padding: 18px 16px; border-radius: 12px; }
+}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}MailPool{% endblock %} · MailPool 客户中心</title>
+    <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com" media="print" onload="this.media='all'">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+          rel="stylesheet" media="print" onload="this.media='all'">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version() }}">
+    <link rel="stylesheet" href="/static/css/customer.css?v={{ asset_version() }}">
+    <script src="/static/js/app.js"></script>
+    {% block head %}{% endblock %}
+</head>
+<body class="customer-view">
+<header class="cust-header">
+    <div class="cust-header-inner">
+        <a href="/app/buy-email" class="cust-brand">
+            <img class="brand-mark" src="/static/img/logo.svg" alt="MailPool">
+            <span class="cust-brand-text">MailPool<span class="brand-sub">客户中心</span></span>
+        </a>
+
+        <nav class="cust-nav">
+            <a href="/app/buy-email" class="cust-nav-item {% if active == 'buy-email' %}active{% endif %}">购买邮箱</a>
+            {% if billing_on %}<a href="/app/orders" class="cust-nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>{% endif %}
+            <a href="/app/recharges" class="cust-nav-item {% if active == 'recharges' %}active{% endif %}">余额与充值</a>
+            <a href="/app/balances" class="cust-nav-item {% if active == 'balances' %}active{% endif %}">费用明细</a>
+        </nav>
+
+        <div class="cust-header-right">
+            {% if user_name %}
+            <span class="cust-user">
+                <span class="cust-user-avatar">{{ user_name[:1]|upper }}</span>
+                {{ user_name }}
+            </span>
+            {% endif %}
+            <a href="/docs/api-overview" target="_blank" class="btn btn-ghost btn-sm">API 文档</a>
+            <a href="/app/logout" class="btn btn-sm">退出</a>
+        </div>
+    </div>
+</header>
+
+<main class="cust-content">
+    {% block content %}{% endblock %}
+</main>
+
+<footer class="cust-footer">
+    <span>MailPool 客户中心</span>
+</footer>
+
+<div id="toast" class="toast"></div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

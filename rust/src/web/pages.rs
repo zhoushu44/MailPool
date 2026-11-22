@@ -111,6 +111,39 @@ fn base_ctx(identity: &Identity, billing_on: bool, active: &str) -> Map<String, 
     );
     ctx.insert("billing_on".into(), json!(billing_on));
     ctx.insert("active".into(), json!(active));
+    // 管理员也能一键切到客户视角（买号/充值页面）。
+    // 计费没开时客户中心只有"购买邮箱"有意义，也给入口 —— 老板要看客户看到什么。
+    ctx.insert("customer_mode_link".into(), json!(true));
+    ctx
+}
+
+/// 客户中心的上下文。
+///
+/// ## 为什么单独一个函数
+///
+/// 管理后台和客户中心现在是**两套独立的布局**（`base_admin.html` /
+/// `base_customer.html`），不再是同一个 `base.html` 靠 `if admin_ok` 切换。
+///
+/// 这样做的原因：原来那套单模板双分支有三个问题 ——
+/// 1. 同一个浏览器**既登录管理员又登录客户**时，`admin_ok` 优先，
+///    客户会看到管理导航（点进去被 302，但导航是可见的）；
+/// 2. 管理员导航 14 项平铺，管理功能和客户功能混在一起；
+/// 3. 客户登录后被跳到 `/recharges`，而客户的主场是 `/app/buy-email`。
+///
+/// 现在客户中心**只认 `user_id`**：管理员进客户视角也能用，但界面
+/// 永远是客户那套，不会露出管理入口。
+fn customer_ctx(identity: &Identity, billing_on: bool, active: &str) -> Map<String, Value> {
+    let mut ctx = Map::new();
+    // 客户中心不需要 admin_ok：模板里根本不用它做分支
+    ctx.insert("user_logged_in".into(), json!(identity.user_id.is_some()));
+    ctx.insert("user_name".into(), json!(identity.username()));
+    ctx.insert("billing_on".into(), json!(billing_on));
+    ctx.insert("active".into(), json!(active));
+    // 保留 has_password：客户中心首页会提示"管理员尚未设置后台口令"
+    ctx.insert(
+        "has_password".into(),
+        json!(Settings::get().has_admin_password()),
+    );
     ctx
 }
 
@@ -300,6 +333,31 @@ pub struct UserLoginForm {
     pub password: String,
 }
 
+/// 旧的客户页路径 → 新路径。
+///
+/// 保留是为了不让老书签和外部链接失效。301 而不是 302：
+/// 这是永久迁移，搜索引擎和浏览器都该记住新地址。
+async fn legacy_customer_redirect(uri: axum::http::Uri) -> Response {
+    let path = uri.path();
+    let target = match path {
+        "/buy-email" => "/app/buy-email",
+        "/orders" => "/app/orders",
+        "/recharges" => "/app/recharges",
+        "/balances" => "/app/balances",
+        _ => "/app/buy-email",
+    };
+    // 带上原查询串（分页/筛选参数不能丢）
+    let target = match uri.query() {
+        Some(q) => format!("{target}?{q}"),
+        None => target.to_string(),
+    };
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, target)],
+    )
+        .into_response()
+}
+
 /// `GET /user/login`
 async fn user_login_page(
     State(st): State<Arc<AppState>>,
@@ -346,7 +404,10 @@ async fn user_login_submit(
         sess.insert("user_id".into(), json!(uid));
         sess.insert("username".into(), json!(username));
         let cookie = session_cookie(&crate::auth::dumps(&sess));
-        return Ok((jar.add(cookie), Redirect::to("/recharges")).into_response());
+        // 客户登录后去「购买邮箱」，不是「余额与充值」。
+        // 原来跳 /recharges 是照搬 Python 的行为，但客户的第一个动作
+        // 几乎总是买号，跳到充值页等于多让人点一次。
+        return Ok((jar.add(cookie), Redirect::to("/app/buy-email")).into_response());
     }
 
     // 失败页保留用户输入的用户名（模板 value="{{ username }}"），省得重打
@@ -682,7 +743,7 @@ async fn buy_email_page(
 ) -> AppResult<Response> {
     // 客户页：管理员或已登录客户都能看（未登录去客户登录页）
     if !identity.is_admin && identity.user_id.is_none() {
-        return Ok(redirect_302("/user/login"));
+        return Ok(redirect_302("/app/login"));
     }
 
     let billing_cfg = settings::get_billing_config(&st.pool).await?;
@@ -748,7 +809,7 @@ async fn buy_email_page(
         rows.push(v);
     }
 
-    let mut ctx = base_ctx(&identity, billing_on, "buy-email");
+    let mut ctx = customer_ctx(&identity, billing_on, "buy-email");
     ctx.insert("projects".into(), Value::Array(rows));
     ctx.insert("billing_on".into(), json!(billing_on));
     ctx.insert("providers".into(), Value::Array(providers_meta()));
@@ -834,7 +895,7 @@ async fn orders_page(
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult<Response> {
     if !identity.is_admin && identity.user_id.is_none() {
-        return Ok(redirect_302("/user/login"));
+        return Ok(redirect_302("/app/login"));
     }
 
     let (page, page_size) = clamp_page(q_i64(&q, "page", 1), q_i64(&q, "page_size", 20), 100);
@@ -926,7 +987,7 @@ async fn orders_page(
         )
     };
 
-    let mut ctx = base_ctx(&identity, billing_on, "orders");
+    let mut ctx = customer_ctx(&identity, billing_on, "orders");
     ctx.insert("rows".into(), Value::Array(rows));
     ctx.insert("total".into(), json!(total));
     ctx.insert("page".into(), json!(page));
@@ -953,7 +1014,7 @@ async fn balances_page(
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult<Response> {
     if !identity.is_admin && identity.user_id.is_none() {
-        return Ok(redirect_302("/user/login"));
+        return Ok(redirect_302("/app/login"));
     }
 
     let (page, page_size) = clamp_page(q_i64(&q, "page", 1), q_i64(&q, "page_size", 20), 100);
@@ -1018,7 +1079,7 @@ async fn balances_page(
 
     let snapshot = billing::balance_snapshot(&st.pool, uid).await?;
 
-    let mut ctx = base_ctx(&identity, billing_on, "balances");
+    let mut ctx = customer_ctx(&identity, billing_on, "balances");
     ctx.insert("records".into(), Value::Array(records));
     ctx.insert("snapshot".into(), serde_json::to_value(&snapshot)?);
     ctx.insert("total".into(), json!(total));
@@ -1068,7 +1129,7 @@ async fn recharges_page(
     Query(q): Query<HashMap<String, String>>,
 ) -> AppResult<Response> {
     if !identity.is_admin && identity.user_id.is_none() {
-        return Ok(redirect_302("/user/login"));
+        return Ok(redirect_302("/app/login"));
     }
 
     let (page, page_size) = clamp_page(q_i64(&q, "page", 1), q_i64(&q, "page_size", 20), 100);
@@ -1122,7 +1183,7 @@ async fn recharges_page(
         Vec::new()
     };
 
-    let mut ctx = base_ctx(&identity, billing_cfg.is_enabled(), "recharges");
+    let mut ctx = customer_ctx(&identity, billing_cfg.is_enabled(), "recharges");
     ctx.insert("snapshot".into(), serde_json::to_value(&snapshot)?);
     ctx.insert("rows".into(), Value::Array(rows));
     ctx.insert("total".into(), json!(total));
@@ -1379,8 +1440,25 @@ pub fn router(templates: Arc<Templates>) -> axum::Router<Arc<AppState>> {
         // ── 登录 ──
         .route("/login", get(login_page).post(login_submit))
         .route("/logout", get(logout))
+        // ── 客户中心（/app/*）：与管理后台完全隔离 ──
+        //
+        // 为什么另起一段路径而不是复用 /buy-email：
+        // 客户在地址栏看到 /app/buy-email 才知道自己在"客户中心"，
+        // 而不是误入管理后台的某个页面。两套布局、两套导航、两套退出。
+        .route("/app", get(|| async { redirect_302("/app/buy-email") }))
+        .route("/app/login", get(user_login_page).post(user_login_submit))
+        .route("/app/logout", get(user_logout))
+        .route("/app/buy-email", get(buy_email_page))
+        .route("/app/orders", get(orders_page))
+        .route("/app/recharges", get(recharges_page))
+        .route("/app/balances", get(balances_page))
+        // 旧的客户路径保留为 301 跳到新路径，避免老书签失效
         .route("/user/login", get(user_login_page).post(user_login_submit))
         .route("/user/logout", get(user_logout))
+        .route("/buy-email", get(legacy_customer_redirect))
+        .route("/orders", get(legacy_customer_redirect))
+        .route("/recharges", get(legacy_customer_redirect))
+        .route("/balances", get(legacy_customer_redirect))
         // ── 管理页 ──
         .route("/", get(dashboard))
         .route("/overview", get(overview_page))
@@ -1388,11 +1466,6 @@ pub fn router(templates: Arc<Templates>) -> axum::Router<Arc<AppState>> {
         .route("/mailbox", get(mailbox_page))
         .route("/projects", get(projects_page))
         .route("/pool", get(pool_page))
-        // ── 客户页 ──
-        .route("/buy-email", get(buy_email_page))
-        .route("/orders", get(orders_page))
-        .route("/balances", get(balances_page))
-        .route("/recharges", get(recharges_page))
         // ── 计费后台 ──
         .route("/billing/users", get(billing_users_page))
         .route("/billing/cards", get(billing_cards_page))

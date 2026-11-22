@@ -1,0 +1,187 @@
+/* ═══════════════════════════════════════════════════════════════
+   管理后台布局（左侧边栏）
+   ───────────────────────────────────────────────────────────────
+   与客户中心（customer.css）视觉上明显不同：
+   - 后台：深色侧边栏 + 浅色内容区，信息密度高
+   - 客户：顶部导航 + 居中卡片，留白多
+
+   这样用户一眼就知道自己在哪套界面里，不会混淆。
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+    --admin-sidebar-w: 232px;
+    --admin-sidebar-bg: #1a2233;
+    --admin-sidebar-hover: #253048;
+    --admin-sidebar-active: #2d3d5c;
+    --admin-sidebar-text: #a8b3c7;
+    --admin-sidebar-text-active: #ffffff;
+    --admin-topbar-h: 56px;
+}
+
+.admin-view {
+    background: #f6f8fb;
+}
+
+.admin-shell {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* ── 侧边栏 ── */
+.admin-sidebar {
+    width: var(--admin-sidebar-w);
+    flex: 0 0 var(--admin-sidebar-w);
+    background: var(--admin-sidebar-bg);
+    display: flex;
+    flex-direction: column;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+}
+
+.admin-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 18px 16px;
+    color: #fff;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(255, 255, 255, .07);
+}
+.admin-brand:hover { text-decoration: none; }
+.admin-brand .brand-mark { width: 24px; height: 24px; }
+.admin-brand-text {
+    display: flex;
+    flex-direction: column;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: .2px;
+}
+.admin-brand-text .brand-sub {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--admin-sidebar-text);
+    margin-top: 1px;
+    letter-spacing: 0;
+}
+
+.admin-nav { padding: 12px 10px; flex: 1; }
+
+.admin-nav-group { margin-bottom: 18px; }
+.admin-nav-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #62708a;
+    padding: 0 10px 6px;
+}
+
+.admin-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: var(--admin-sidebar-text);
+    text-decoration: none;
+    font-size: 13.5px;
+    transition: background .12s, color .12s;
+    margin-bottom: 1px;
+}
+.admin-nav-item:hover {
+    background: var(--admin-sidebar-hover);
+    color: #fff;
+    text-decoration: none;
+}
+.admin-nav-item.active {
+    background: var(--admin-sidebar-active);
+    color: var(--admin-sidebar-text-active);
+    font-weight: 500;
+}
+.admin-nav-ico {
+    width: 16px;
+    text-align: center;
+    opacity: .75;
+    font-size: 13px;
+}
+
+.admin-sidebar-foot {
+    padding: 12px 18px 18px;
+    border-top: 1px solid rgba(255, 255, 255, .07);
+}
+.admin-logout {
+    color: var(--admin-sidebar-text);
+    font-size: 13px;
+    text-decoration: none;
+}
+.admin-logout:hover { color: #fff; text-decoration: none; }
+
+/* ── 主区域 ── */
+.admin-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.admin-topbar {
+    height: var(--admin-topbar-h);
+    flex: 0 0 var(--admin-topbar-h);
+    background: #fff;
+    border-bottom: 1px solid #e8ecf2;
+    display: flex;
+    align-items: center;
+    padding: 0 24px;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}
+.admin-topbar-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a2233;
+}
+.admin-topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+.admin-content {
+    flex: 1;
+    padding: 22px 24px 40px;
+    max-width: 1500px;
+    width: 100%;
+}
+
+/* 后台卡片紧凑一些（信息密度高） */
+.admin-content .card {
+    background: #fff;
+    border: 1px solid #e8ecf2;
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin-bottom: 16px;
+}
+.admin-content .page-title {
+    font-size: 20px;
+    font-weight: 650;
+    margin-bottom: 4px;
+    color: #1a2233;
+}
+.admin-content .page-sub {
+    font-size: 13px;
+    color: #7a8699;
+    margin-bottom: 18px;
+}
+
+/* ── 窄屏：侧边栏折叠成图标条 ── */
+@media (max-width: 900px) {
+    :root { --admin-sidebar-w: 56px; }
+    .admin-brand-text,
+    .admin-nav-title,
+    .admin-nav-item span:not(.admin-nav-ico),
+    .admin-logout { display: none; }
+    .admin-nav-item { justify-content: center; padding: 9px 0; }
+    .admin-sidebar-foot { padding: 10px; }
+    .admin-content { padding: 16px 14px 32px; }
+    .admin-topbar { padding: 0 14px; }
+}
