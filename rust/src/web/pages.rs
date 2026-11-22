@@ -736,6 +736,30 @@ async fn pool_page(
 }
 
 /// `GET /buy-email` —— 商城：项目卡片按「价格 / 库存 / 过滤规则」展示。
+
+/// `GET /app/mailbox` —— 客户收件页。
+///
+/// 购买页点「获取邮箱」后跳到这里（带 `?project_code=&email=`），
+/// 页面用 `/api/app/mailbox/*` 拉邮件并自动解析验证码。
+///
+/// 之前这个路由不存在，客户点「获取邮箱」直接 404 —— 复刻时漏掉的整块。
+async fn app_mailbox_page(
+    State(st): State<Arc<AppState>>,
+    Extension(t): Extension<Arc<Templates>>,
+    identity: Identity,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Response> {
+    if !identity.is_admin && identity.user_id.is_none() {
+        return Ok(redirect_302("/app/login"));
+    }
+    let billing_cfg = settings::get_billing_config(&st.pool).await?;
+    // 用 customer_ctx：属于客户中心，不能带 admin_ok 走后台布局
+    let mut ctx = customer_ctx(&identity, billing_cfg.is_enabled(), "mailbox");
+    ctx.insert("selected_email".into(), json!(q_str(&q, "email")));
+    ctx.insert("selected_project".into(), json!(q_str(&q, "project_code")));
+    render_html(&t, "app_mailbox.html", &ctx)
+}
+
 async fn buy_email_page(
     State(st): State<Arc<AppState>>,
     Extension(t): Extension<Arc<Templates>>,
@@ -1461,6 +1485,7 @@ pub fn router(templates: Arc<Templates>) -> axum::Router<Arc<AppState>> {
         .route("/app/orders", get(orders_page))
         .route("/app/recharges", get(recharges_page))
         .route("/app/balances", get(balances_page))
+        .route("/app/mailbox", get(app_mailbox_page))
         // 旧的客户路径保留为 301 跳到新路径，避免老书签失效
         .route("/user/login", get(user_login_page).post(user_login_submit))
         .route("/user/logout", get(user_logout))

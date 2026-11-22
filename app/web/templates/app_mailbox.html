@@ -1,0 +1,324 @@
+{% extends "base_customer.html" %}
+{% block title %}收件箱{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">收件箱</div>
+        <div class="page-sub">邮箱收到验证码后会自动解析，复制即可使用</div>
+    </div>
+    <button class="btn" onclick="refreshAll()" id="refreshBtn">刷新</button>
+</div>
+
+<div class="mb-layout">
+    {# 左侧：我取过的邮箱 #}
+    <aside class="mb-side">
+        <div class="mb-side-title">我的邮箱</div>
+        <div id="emailList" class="mb-list">
+            <div class="mb-loading">加载中…</div>
+        </div>
+    </aside>
+
+    {# 右侧：邮件列表 #}
+    <section class="mb-main">
+        <div class="mb-current" id="currentBar" style="display:none">
+            <div class="mb-current-info">
+                <span class="mb-current-label">当前邮箱</span>
+                <span class="mb-current-mail mono" id="currentEmail"></span>
+                <span class="mb-countdown" id="countdown"></span>
+            </div>
+            <button class="btn btn-sm btn-ghost" onclick="copyEmail()">复制</button>
+        </div>
+
+        <div id="mailArea">
+            <div class="card">
+                <div class="empty">
+                    {% if selected_email %}
+                    正在加载 {{ selected_email }} 的邮件…
+                    {% else %}
+                    从左侧选择一个邮箱查看邮件
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let _currentEmail = {{ (selected_email or '')|tojson }};
+let _timer = null;
+let _deadline = null;
+
+/* ── 加载我的邮箱列表 ── */
+async function loadEmails() {
+    const box = document.getElementById('emailList');
+    try {
+        const r = await api('/api/app/mailbox/my-emails?limit=30');
+        if (r.code !== '00000') {
+            box.innerHTML = '<div class="mb-empty">' + esc(r.msg || '加载失败') + '</div>';
+            return;
+        }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) {
+            box.innerHTML = '<div class="mb-empty">还没有取过邮箱<br><a href="/app/buy-email">去选择项目</a></div>';
+            return;
+        }
+        box.innerHTML = items.map(it => {
+            const active = it.email === _currentEmail ? ' active' : '';
+            const dot = it.status === 'holding'
+                ? '<span class="mb-dot mb-dot-live" title="占用中"></span>'
+                : '<span class="mb-dot" title="已释放"></span>';
+            return '<div class="mb-item' + active + '" onclick="pick(' + JSON.stringify(it.email).replace(/"/g,'&quot;') + ')">'
+                 + dot
+                 + '<div class="mb-item-body">'
+                 +   '<div class="mb-item-mail mono">' + esc(it.email) + '</div>'
+                 +   '<div class="mb-item-meta">' + esc(it.project_code || '') + '</div>'
+                 + '</div></div>';
+        }).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="mb-empty">加载失败：' + esc(e.message) + '</div>';
+    }
+}
+
+function pick(email) {
+    _currentEmail = email;
+    document.querySelectorAll('.mb-item').forEach(el => el.classList.remove('active'));
+    loadEmails();
+    loadMails();
+}
+
+async function loadMails() {
+    const area = document.getElementById('mailArea');
+    const bar = document.getElementById('currentBar');
+    if (!_currentEmail) {
+        area.innerHTML = '<div class="card"><div class="empty">从左侧选择一个邮箱查看邮件</div></div>';
+        bar.style.display = 'none';
+        return;
+    }
+    bar.style.display = 'flex';
+    document.getElementById('currentEmail').textContent = _currentEmail;
+
+    area.innerHTML = '<div class="card"><div class="empty">正在拉取邮件…</div></div>';
+    try {
+        const q = '?email=' + encodeURIComponent(_currentEmail) + '&folder=inbox&top=15';
+        const r = await api('/api/app/mailbox/messages' + q);
+        if (r.code !== '00000') {
+            area.innerHTML = '<div class="card"><div class="empty">' + esc(r.msg || '拉取失败') + '</div></div>';
+            return;
+        }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) {
+            area.innerHTML = '<div class="card"><div class="empty">'
+                + '还没有收到邮件<br><span style="font-size:12.5px">在目标网站点击“发送验证码”，这里会自动刷新</span>'
+                + '</div></div>';
+            return;
+        }
+        area.innerHTML = items.map((m, i) => {
+            // Graph 的原始字段结构：
+            //   from: { emailAddress: { address, name } }
+            //   receivedDateTime: "2026-11-22T08:20:29Z"
+            //   bodyPreview: 前 255 字符正文
+            // 原来直接取 m.from 会显示成 "[object Object]"。
+            const fromObj = m.from && m.from.emailAddress ? m.from.emailAddress : (m.from || {});
+            const fromAddr = typeof fromObj === 'string' ? fromObj : (fromObj.address || '');
+            const fromName = typeof fromObj === 'string' ? '' : (fromObj.name || '');
+            const from = esc(fromName ? (fromName + ' <' + fromAddr + '>') : fromAddr);
+            const rawWhen = m.receivedDateTime || m.received_at || '';
+            const when = esc(String(rawWhen).replace('T',' ').replace('Z','').slice(0,19));
+            const subj = esc(m.subject || '(无主题)');
+            const code = (m.code || '').trim();
+            const codeHtml = code
+                ? '<span class="mb-code" onclick="copyCode(this, ' + JSON.stringify(code).replace(/"/g,'&quot;') + ')">' + esc(code) + '</span>'
+                : '<span class="mb-nocode">未识别到验证码</span>';
+            return '<div class="mb-mail">'
+                 + '<div class="mb-mail-head">'
+                 +   '<div class="mb-mail-subj">' + subj + '</div>'
+                 +   '<div class="mb-mail-when">' + when + '</div>'
+                 + '</div>'
+                 + '<div class="mb-mail-from mono">' + from + '</div>'
+                 + '<div class="mb-mail-foot">' + codeHtml + '</div>'
+                 + '</div>';
+        }).join('');
+    } catch (e) {
+        area.innerHTML = '<div class="card"><div class="empty">拉取失败：' + esc(e.message) + '</div></div>';
+    }
+}
+
+function copyCode(el, code) {
+    navigator.clipboard.writeText(code).then(() => {
+        el.classList.add('copied');
+        el.textContent = '已复制 ✓';
+        setTimeout(() => { el.classList.remove('copied'); el.textContent = code; }, 1200);
+    }).catch(() => {
+        // 剪贴板不可用时退化为选中文本
+        const r = document.createRange();
+        r.selectNodeContents(el);
+        const s = window.getSelection();
+        s.removeAllRanges(); s.addRange(r);
+    });
+}
+
+function copyEmail() {
+    if (!_currentEmail) return;
+    navigator.clipboard.writeText(_currentEmail).then(() => toast('已复制邮箱', 'ok'));
+}
+
+function refreshAll() {
+    const b = document.getElementById('refreshBtn');
+    b.disabled = true; b.textContent = '刷新中…';
+    Promise.all([loadEmails(), loadMails()]).finally(() => {
+        b.disabled = false; b.textContent = '刷新';
+    });
+}
+
+/* 自动轮询：等验证码时不用手动刷。
+   30 秒内每 4 秒拉一次，之后降频到 10 秒（避免一直空转）。 */
+function startPolling() {
+    let n = 0;
+    if (_timer) clearInterval(_timer);
+    _timer = setInterval(() => {
+        if (!_currentEmail) return;
+        if (document.hidden) return;          // 页面不可见时不刷
+        n++;
+        if (n <= 8 || n % 3 === 0) loadMails();
+    }, 4000);
+}
+
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+(function init() {
+    loadEmails().then(() => {
+        if (_currentEmail) loadMails();
+    });
+    startPolling();
+})();
+</script>
+
+<style>
+.mb-layout {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 16px;
+    align-items: start;
+}
+.mb-side {
+    background: #fff;
+    border: 1px solid rgba(226,232,240,.7);
+    border-radius: 16px;
+    padding: 14px;
+    position: sticky;
+    top: 80px;
+}
+.mb-side-title {
+    font-size: 11.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: #64748b;
+    padding: 0 6px 10px;
+}
+.mb-list { display: grid; gap: 2px; max-height: 62vh; overflow-y: auto; }
+.mb-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 10px;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: background .12s;
+}
+.mb-item:hover { background: #f1f5f9; }
+.mb-item.active { background: #eff6ff; }
+.mb-dot {
+    width: 6px; height: 6px; border-radius: 9999px;
+    background: #cbd5e1; flex-shrink: 0;
+}
+.mb-dot-live { background: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.15); }
+.mb-item-body { min-width: 0; flex: 1; }
+.mb-item-mail {
+    font-size: 12.5px;
+    color: #0f172a;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mb-item-meta { font-size: 11px; color: #94a3b8; margin-top: 1px; }
+.mb-loading, .mb-empty {
+    padding: 20px 10px;
+    text-align: center;
+    font-size: 12.5px;
+    color: #94a3b8;
+    line-height: 1.7;
+}
+
+.mb-main { min-width: 0; }
+.mb-current {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: #fff;
+    border: 1px solid rgba(226,232,240,.7);
+    border-radius: 14px;
+    margin-bottom: 14px;
+}
+.mb-current-info { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.mb-current-label {
+    font-size: 11px; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em;
+}
+.mb-current-mail {
+    font-size: 13.5px; font-weight: 550; color: #0f172a;
+    overflow: hidden; text-overflow: ellipsis;
+}
+.mb-countdown {
+    font-size: 11.5px; color: #f59e0b;
+    background: rgba(245,158,11,.1); padding: 2px 8px; border-radius: 9999px;
+}
+
+.mb-mail {
+    background: #fff;
+    border: 1px solid rgba(226,232,240,.7);
+    border-radius: 14px;
+    padding: 16px 18px;
+    margin-bottom: 10px;
+    transition: box-shadow .15s;
+}
+.mb-mail:hover { box-shadow: 0 4px 14px rgba(15,23,42,.06); }
+.mb-mail-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    margin-bottom: 5px;
+}
+.mb-mail-subj {
+    font-size: 14px; font-weight: 600; color: #0f172a;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mb-mail-when { font-size: 11.5px; color: #94a3b8; flex-shrink: 0; }
+.mb-mail-from { font-size: 11.5px; color: #94a3b8; margin-bottom: 12px; }
+.mb-mail-foot { display: flex; align-items: center; gap: 10px; }
+.mb-code {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    color: #2563eb;
+    background: #eff6ff;
+    padding: 7px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    transition: background .15s;
+    font-family: ui-monospace, monospace;
+}
+.mb-code:hover { background: #dbeafe; }
+.mb-code.copied { background: #dcfce7; color: #16a34a; }
+.mb-nocode { font-size: 12.5px; color: #94a3b8; }
+
+@media (max-width: 860px) {
+    .mb-layout { grid-template-columns: 1fr; }
+    .mb-side { position: static; }
+    .mb-list { max-height: 200px; }
+    .mb-mail-subj { font-size: 13.5px; }
+    .mb-code { font-size: 18px; }
+}
+</style>
+{% endblock %}

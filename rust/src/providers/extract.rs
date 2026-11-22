@@ -208,6 +208,7 @@ fn is_year(digits: &str) -> bool {
 
 /// 从邮件 dict 提取验证码：优先用预提取字段，再回退全文。
 pub fn extract_code_from_mail(mail: &serde_json::Value) -> String {
+    // 1) 上游已经给过码（AI 提取结果 / 缓存）直接用
     for key in ["code", "code_match", "otp", "verification_code"] {
         if let Some(v) = mail.get(key) {
             if let Some(s) = v.as_str() {
@@ -218,15 +219,46 @@ pub fn extract_code_from_mail(mail: &serde_json::Value) -> String {
             }
         }
     }
+
+    // 2) 从正文里抽。
+    //
+    // 字段名必须同时覆盖两种命名：
+    //   snake_case —— 内部构造的 mail 对象
+    //   camelCase  —— Graph API 原始响应（bodyPreview / receivedDateTime）
+    //
+    // 原来只写了 snake_case，而客户收件页拿到的是 Graph 原始 JSON，
+    // 于是正文一个字都读不到 —— 实测 15 封邮件一个验证码都没提取出来。
+    //
+    // Graph 的 body 是个对象 `{ contentType, content }`，
+    // 不能只按字符串取，要往下钻一层拿 content。
     let mut combined = String::new();
-    for key in ["subject", "body_preview", "body", "text"] {
-        if let Some(s) = mail.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                combined.push_str(s);
-                combined.push('\n');
-            }
+    for key in [
+        "subject",
+        "body_preview", "bodyPreview",
+        "body", "text", "body_text", "bodyText", "snippet",
+    ] {
+        let Some(v) = mail.get(key) else { continue };
+
+        let text = if let Some(s) = v.as_str() {
+            s.to_string()
+        } else if let Some(c) = v.get("content").and_then(|x| x.as_str()) {
+            c.to_string()
+        } else if let Some(c) = v.get("content").and_then(|x| x.as_array()) {
+            // 个别实现把 content 做成段落数组
+            c.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            continue;
+        };
+
+        if !text.is_empty() {
+            combined.push_str(&text);
+            combined.push('\n');
         }
     }
+
     extract_code(&combined)
 }
 

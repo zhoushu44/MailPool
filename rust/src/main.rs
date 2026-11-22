@@ -65,6 +65,7 @@ pub async fn build_app(state: Arc<AppState>) -> Router {
         .merge(public_api)
         .merge(api::recharge::router())
         .merge(api::auth::router())
+        .merge(api::app_mailbox::router())
         .merge(api::backup::router())
         .merge(api::admin::router())
         .merge(web::pages::router(state.templates.clone()))

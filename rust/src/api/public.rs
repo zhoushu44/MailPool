@@ -132,7 +132,11 @@ pub async fn buy_email(
     } else {
         crate::money::Money::ZERO
     };
-    let user_id = if billing_on { identity.user_id } else { None };
+    // 注意：user_id **不能**跟 billing_on 绑在一起。
+    // 计费关闭时也要记录是谁取的号 —— 否则客户的「我的邮箱」列表永远是空的
+    // （邮件查询要靠 user_id 过滤），这是客户反馈「收件页看不到邮箱」的根因。
+    // 计费只决定要不要冻结/扣钱，不决定要不要记归属。
+    let user_id = identity.user_id;
 
     // 余额预检（批量按单价 × count 估）
     if billing_on {
@@ -186,9 +190,16 @@ pub async fn buy_email(
         }
     }
 
-    // 取号成功后再冻结（每号一条订单）
-    if billing_on {
-        if let Some(uid) = user_id {
+    // 取号后写归属记录（每号一条订单）。
+    //
+    // **计费关闭时也要写**：订单是「谁取了这个号」的唯一凭据，
+    // 客户的收件页靠它列出自己的邮箱。原来只在 billing_on 时写，
+    // 结果生产上 email_orders 一直是 0 行，客户点「获取邮箱」后
+    // 收件页左侧永远是空的。
+    //
+    // 计费开启时才额外做冻结（billing::hold 会写 hold_amount）。
+    if let Some(uid) = user_id {
+        {
             let mut charged = Vec::new();
             for item in items {
                 let email = item
@@ -196,20 +207,66 @@ pub async fn buy_email(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                match billing::hold(pool_ref, uid, &email, &project.code, &project.provider, price)
-                    .await
-                {
-                    Ok(_) => charged.push(item),
-                    Err(AppError::InsufficientBalance { need, available }) => {
-                        failure = Some((
-                            CODE_BALANCE.to_string(),
-                            format!("余额不足，需要 {need} 元，可用 {available} 元"),
-                        ));
-                        break;
+                if billing_on {
+                    // 计费开启：冻结并写订单
+                    match billing::hold(pool_ref, uid, &email, &project.code, &project.provider, price)
+                        .await
+                    {
+                        Ok(_) => charged.push(item),
+                        Err(AppError::InsufficientBalance { need, available }) => {
+                            failure = Some((
+                                CODE_BALANCE.to_string(),
+                                format!("余额不足，需要 {need} 元，可用 {available} 元"),
+                            ));
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("冻结失败 email={email}: {e}");
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("冻结失败 email={email}: {e}");
+                } else {
+                    // 计费关闭：只记归属，不动余额。
+                    // 用 INSERT OR IGNORE 防重复（同一邮箱同项目只一条）。
+                    // 同一 (email, project_code) 已有订单时更新归属，
+                    // 不能简单 INSERT OR IGNORE —— 那会让「A 释放后 B 再取」
+                    // 的场景丢失 B 的归属（订单还挂在 A 名下）。
+                    let now = crate::util::now_naive();
+                    let upd = sqlx::query(
+                        "UPDATE email_orders SET user_id = ?, created_at = ?, billing_status = 'free' \
+                         WHERE email = ? AND project_code = ?",
+                    )
+                    .bind(uid)
+                    .bind(now)
+                    .bind(&email)
+                    .bind(&project.code)
+                    .execute(pool_ref)
+                    .await;
+                    let need_insert = match &upd {
+                        Ok(r) => r.rows_affected() == 0,
+                        Err(e) => {
+                            tracing::warn!("更新归属失败 email={email}: {e}");
+                            false
+                        }
+                    };
+                    if need_insert {
+                        let r = sqlx::query(
+                            "INSERT INTO email_orders \
+                             (user_id, email, project_code, provider, price, billing_status, \
+                              hold_amount, charged_amount, created_at) \
+                             VALUES (?, ?, ?, ?, 0, 'free', 0, 0, ?)",
+                        )
+                        .bind(uid)
+                        .bind(&email)
+                        .bind(&project.code)
+                        .bind(&project.provider)
+                        .bind(now)
+                        .execute(pool_ref)
+                        .await;
+                        if let Err(e) = r {
+                            tracing::warn!("写归属记录失败 email={email}: {e}");
+                        }
                     }
+                    charged.push(item);
                 }
             }
             items = charged;
