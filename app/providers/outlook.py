@@ -13,6 +13,7 @@ import email.utils as _eu
 import imaplib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -230,7 +231,9 @@ def verify_account(cred: dict[str, Any]) -> tuple[str, str]:
         data = _refresh_token_for(cred, GRAPH_SCOPE)
         access_token = data["access_token"]
 
-        # Graph API 验证：拉取 1 封邮件
+        # Graph API 验证：拉取 1 封邮件（过出口限流：健康扫描批量跑时排队，
+        # 不和收码轮询抢配额）
+        _rate_acquire("graph", cid, max_wait=10.0)
         req = urllib.request.Request(
             f"{GRAPH_BASE}/me/messages?$top=1&$select=id",
             headers={"Authorization": f"Bearer {access_token}"},
@@ -303,7 +306,8 @@ def silent_keepalive(cred: dict[str, Any], interactive: bool = False) -> tuple[b
         else:
             logger.info(f"[keepalive] token 刷新成功，refresh_token 未变")
 
-        # 拉取收件箱前 5 封
+        # 拉取收件箱前 5 封（过出口限流：保活批量跑时排队）
+        _rate_acquire("graph", cid, max_wait=10.0)
         params = urllib.parse.urlencode({
             "$top": "5",
             "$orderby": "receivedDateTime DESC",
@@ -352,32 +356,51 @@ def _request_access_token(refresh_token: str, client_id: str, scope: str, proxy:
     logger.info(f"[token] 刷新 token cid={client_id[:8]}...{client_id[-4:]} scope={scope} endpoints={len(TOKEN_ENDPOINTS)} proxy={'yes' if proxy else 'no'}")
     last_error = ""
     for idx, endpoint in enumerate(TOKEN_ENDPOINTS, 1):
-        try:
-            body = urllib.parse.urlencode({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": client_id,
-                "scope": scope,
-            }).encode()
-            req = urllib.request.Request(endpoint, data=body)
-            resp = _urlopen(req, timeout=15, proxy=proxy)
-            data = json.loads(resp.read())
-            if data.get("access_token"):
-                logger.info(f"[token] ✓ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 刷新成功")
-                return data
-            last_error = f"no access_token from {endpoint}"
-            logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 返回无 access_token")
-        except urllib.error.HTTPError as e:
-            text = e.read().decode("utf-8", errors="replace")
-            last_error = f"HTTP {e.code} {endpoint}: {text}"
-            logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} HTTP {e.code}: {text[:80]}")
-            if e.code in (400, 401, 403):
-                continue
-            raise
-        except Exception as e:
-            last_error = f"{endpoint}: {e}"
-            logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 异常: {e}")
-            continue
+        attempt = 0
+        while True:
+            attempt += 1
+            # login 端点比 Graph 更容易被 client_id 级限流：出口先拿令牌，
+            # 批量刷新/健康扫描高峰时在这里排队，而不是一窝蜂打 429。
+            if not _rate_acquire("token", client_id, max_wait=8.0):
+                last_error = f"token 令牌排队超时 {endpoint}"
+                logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 限流排队超时")
+                break
+            try:
+                body = urllib.parse.urlencode({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": client_id,
+                    "scope": scope,
+                }).encode()
+                req = urllib.request.Request(endpoint, data=body)
+                resp = _urlopen(req, timeout=15, proxy=proxy)
+                data = json.loads(resp.read())
+                if data.get("access_token"):
+                    logger.info(f"[token] ✓ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 刷新成功")
+                    return data
+                last_error = f"no access_token from {endpoint}"
+                logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 返回无 access_token")
+                break
+            except urllib.error.HTTPError as e:
+                text = e.read().decode("utf-8", errors="replace")
+                last_error = f"HTTP {e.code} {endpoint}: {text}"
+                logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} HTTP {e.code}: {text[:80]}")
+                if e.code in (429, 503):
+                    # 限流是 client_id 级的，换端点没用；歇 Retry-After 原地重试。
+                    if attempt < 3:
+                        wait = min(max(_retry_after_seconds(e), 2.0), 10.0)
+                        _rate_penalize("token", client_id)
+                        logger.warning(f"[token] 端点 {idx} HTTP {e.code}（限流），歇 {wait:.0f}s 后重试（第 {attempt} 次）")
+                        time.sleep(wait)
+                        continue
+                    break  # 重试额度用完 → 换下一个端点再试
+                if e.code in (400, 401, 403):
+                    break  # → 下一个端点
+                break  # 其它（5xx 等）也换端点：全部失败后统一抛 ProviderError
+            except Exception as e:
+                last_error = f"{endpoint}: {e}"
+                logger.info(f"[token] ✗ 端点 {idx}/{len(TOKEN_ENDPOINTS)} {endpoint} 异常: {e}")
+                break
     logger.info(f"[token] 所有端点均失败，scope={scope} last_error={last_error[:100]}")
     raise ProviderError(f"token 获取失败 (scope={scope}): {last_error}", fatal=True)
 
@@ -425,6 +448,143 @@ def _refresh_token_for(cred: dict[str, Any], scope: str, email: str = "") -> dic
                 except Exception as e:
                     logger.warning(f"[token] 轮换 rt 回写失败 {email}: {e}")
         return data
+
+
+# ── Graph/Token 出口限流（client_id 级令牌桶）────────────────
+# 2026-11-22 并发实测（注册收码）：
+#   并发 15 → 15/15 成功，收码 ~30s（聚合 ~10 rps，一切正常）
+#   并发 20 → 12/20 成功，收码 229~236s（聚合 ~13 rps，整体退化）
+#   并发 25 → 16/25 成功，收码 238~251s
+# 瓶颈不在单个邮箱，而在微软对「同一 client_id + 同一出口 IP」的聚合限流：
+# Graph 轮询全部从本机直连（_graph_list_messages 不走账号代理），号池若共用
+# 一个 client_id，20 个线程同时轮询 ≈ 13 rps 就撞线。微软限流的第一表现
+# 不是 429，而是响应整体变慢（单轮 4~8s）；继续加压才吐 429——而 429 一旦
+# 被轮询循环 raise 出去，该账号的 Graph 通道当场死亡、整批挤进 IMAP 降级
+# → 雪崩到 230s。
+# 治理：与其放任 N 个线程打爆后集体超时，不如在客户端把聚合速率压在实测
+# 安全线以下，超发请求排队等令牌（收码慢 1~2s，但不再雪崩）。
+# 桶按 client_id 分组——将来导入第二个 Azure 应用的号自动享受独立配额，
+# 并发上限随 client_id 数量线性扩展。
+_GRAPH_RPS = float(os.getenv("MAILPOOL_GRAPH_RPS", "8"))
+_GRAPH_BURST = float(os.getenv("MAILPOOL_GRAPH_BURST", "12"))
+_TOKEN_RPS = float(os.getenv("MAILPOOL_TOKEN_RPS", "4"))
+_TOKEN_BURST = float(os.getenv("MAILPOOL_TOKEN_BURST", "10"))
+
+
+class _TokenBucket:
+    """线程安全令牌桶：稳态速率 rate 个/秒，桶容量 burst 个（允许瞬时突发）。"""
+
+    def __init__(self, rate: float, burst: float) -> None:
+        self.rate = max(0.1, float(rate))
+        self.burst = max(1.0, float(burst))
+        self._tokens = self.burst
+        self._updated = time.monotonic()
+        self._cv = threading.Condition()
+
+    def acquire(self, max_wait: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, max_wait)
+        with self._cv:
+            while True:
+                now = time.monotonic()
+                self._tokens = min(self.burst, self._tokens + (now - self._updated) * self.rate)
+                self._updated = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return True
+                need = (1.0 - self._tokens) / self.rate
+                left = deadline - time.monotonic()
+                if need >= left:
+                    return False
+                self._cv.wait(need)
+
+    def penalize(self) -> None:
+        """收到 429/503 后清空桶：所有线程一起停一拍，别继续顶风加压。"""
+        with self._cv:
+            self._tokens = 0.0
+            self._cv.notify_all()
+
+
+_buckets: dict[tuple[str, str], _TokenBucket] = {}
+_buckets_guard = threading.Lock()
+
+
+def _bucket_for(kind: str, client_id: str) -> _TokenBucket:
+    key = (kind, str(client_id or "?").strip().lower())
+    with _buckets_guard:
+        if key not in _buckets:
+            rate, burst = (_TOKEN_RPS, _TOKEN_BURST) if kind == "token" else (_GRAPH_RPS, _GRAPH_BURST)
+            _buckets[key] = _TokenBucket(rate, burst)
+        return _buckets[key]
+
+
+def _rate_acquire(kind: str, client_id: str, max_wait: float = 5.0) -> bool:
+    """拿一个出口令牌；False = 排队超时（调用方应降速/让位，而不是硬打）。"""
+    return _bucket_for(kind, client_id).acquire(max_wait)
+
+
+def _rate_penalize(kind: str, client_id: str) -> None:
+    _bucket_for(kind, client_id).penalize()
+
+
+def _retry_after_seconds(exc: Exception) -> float:
+    """从 HTTPError 解析 Retry-After（纯秒数或 HTTP 日期），失败返回 0。"""
+    headers = getattr(exc, "headers", None)
+    try:
+        value = str(headers.get("Retry-After") or "").strip()  # type: ignore[union-attr]
+    except Exception:
+        return 0.0
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        dt = _eu.parsedate_to_datetime(value)
+        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+    except Exception:
+        return 0.0
+
+
+# ── access_token 进程内缓存 ────────────────────────────────
+# access_token 是独立 bearer（有效期 ~1h，与 rt 轮换无关），没必要每次
+# wait_code 都打一遍 login 端点——token 请求恰恰是最容易被聚合限流的一发，
+# 而且每次刷新都触发一次 rt 轮换（多一次写库、多一分并发竞态）。
+# 缓存 key = scope|email：Graph 与 IMAP 两种 scope 的 token 互不通用。
+_token_cache: dict[str, tuple[str, float]] = {}  # f"{scope}|{email}" → (token, 过期时刻)
+_token_cache_guard = threading.Lock()
+
+
+def _cached_token(email: str, scope: str) -> str:
+    if not email:
+        return ""
+    with _token_cache_guard:
+        hit = _token_cache.get(f"{scope}|{email.lower()}")
+    if hit and hit[1] > time.time():
+        return hit[0]
+    return ""
+
+
+def _cache_token(email: str, scope: str, access_token: str, expires_in: Any = 3600) -> None:
+    if not email or not access_token:
+        return
+    try:
+        ttl = int(float(expires_in or 3600))  # expires_in 偶尔是字符串
+    except (TypeError, ValueError):
+        ttl = 3600
+    ttl = max(60, min(ttl - 300, 3900))  # 提前 5 分钟过期，留足余量
+    now = time.time()
+    with _token_cache_guard:
+        _token_cache[f"{scope}|{email.lower()}"] = (access_token, now + ttl)
+        for k in [k for k, (_, exp) in _token_cache.items() if exp < now - 3600]:
+            _token_cache.pop(k, None)
+
+
+def _invalidate_token(email: str, scope: str) -> None:
+    if not email:
+        return
+    with _token_cache_guard:
+        _token_cache.pop(f"{scope}|{email.lower()}", None)
 
 
 def _is_hex_color_context(haystack: str, idx: int) -> bool:
@@ -518,6 +678,7 @@ def _graph_get_message_rest(access_token: str, message_id: str, timeout: float =
 def graph_list_messages(cred: dict[str, Any], folder: str = "inbox", top: int = 20) -> list[dict[str, Any]]:
     folder = folder if folder in GRAPH_FOLDERS else "inbox"
     proxy = cred.get("proxy") or ""
+    _rate_acquire("graph", str(cred.get("client_id") or ""), max_wait=8.0)
     data = _refresh_token_for(cred, GRAPH_SCOPE)
     params = urllib.parse.urlencode({"$top": str(max(1, min(top, 100))), "$orderby": "receivedDateTime DESC", "$select": "id,subject,bodyPreview,receivedDateTime,from,toRecipients,isRead"})
     req = urllib.request.Request(f"{GRAPH_BASE}/me/mailFolders/{folder}/messages?{params}", headers={"Authorization": f"Bearer {data['access_token']}", "Accept": "application/json"})
@@ -527,6 +688,7 @@ def graph_list_messages(cred: dict[str, Any], folder: str = "inbox", top: int = 
 
 def graph_get_message(cred: dict[str, Any], message_id: str) -> dict[str, Any]:
     proxy = cred.get("proxy") or ""
+    _rate_acquire("graph", str(cred.get("client_id") or ""), max_wait=8.0)
     data = _refresh_token_for(cred, GRAPH_SCOPE)
     safe_id = urllib.parse.quote(message_id, safe="")
     params = urllib.parse.urlencode({"$select": "id,subject,body,bodyPreview,receivedDateTime,from,toRecipients,isRead"})
@@ -655,8 +817,14 @@ class OutlookEmailProvider(EmailProvider):
 
     # ── Graph API ──────────────────────────────────────────
     def _graph_wait_code(self, cred: dict[str, Any], email: str, timeout: float, skip_codes: set[str] | None = None) -> dict[str, Any] | None:
-        data = _refresh_token_for(cred, GRAPH_SCOPE, email=email)
-        access_token = data["access_token"]
+        cid = str(cred.get("client_id") or "")
+        # access_token 有效期 ~1h 且与 rt 轮换无关：能复用就不打 login 端点
+        # （token 请求恰恰是最容易被聚合限流、也最容易触发 rt 轮换的一发）。
+        access_token = _cached_token(email, GRAPH_SCOPE)
+        if not access_token:
+            data = _refresh_token_for(cred, GRAPH_SCOPE, email=email)
+            access_token = data["access_token"]
+            _cache_token(email, GRAPH_SCOPE, access_token, data.get("expires_in"))
         seen: set[str] = set()
         deadline = time.time() + timeout
         baseline: set[str] = set(self._baseline_ids)
@@ -672,6 +840,7 @@ class OutlookEmailProvider(EmailProvider):
         SIDE_FOLDERS = [f for f in GRAPH_FOLDERS if f != INBOX]
         SIDE_EVERY = 5
         round_no = 0
+        consecutive_bad_rounds = 0  # 连续「整轮全灭」计数：3 轮才放弃降级 IMAP
         logger.info(
             f"[outlook-graph] 轮询开始 email={email} folders={GRAPH_FOLDERS} "
             f"基线={len(baseline)}封 baseline_at={baseline_at}"
@@ -679,11 +848,19 @@ class OutlookEmailProvider(EmailProvider):
         while time.time() < deadline:
             round_no += 1
             round_slow = False
+            round_ok = False
+            round_hard_error: urllib.error.HTTPError | None = None
             folders = [INBOX]
             if round_no % SIDE_EVERY == 1:
                 folders += SIDE_FOLDERS
             for folder in folders:
                 if time.time() >= deadline:
+                    break
+                # 出口令牌（client_id 级）：拿不到就本轮让位。并发高峰下
+                # 这里的排队把「打爆聚合限流 → 集体 230s」换成「每轮慢 1~2s」。
+                if not _rate_acquire("graph", cid, max_wait=2.0):
+                    round_slow = True
+                    logger.info("[outlook-graph] Graph 令牌排队超时，本轮让位（并发高峰正常现象）")
                     break
                 try:
                     # 单文件夹硬上限 8 秒：超时就放弃这一轮的这个文件夹。
@@ -692,19 +869,39 @@ class OutlookEmailProvider(EmailProvider):
                 except urllib.error.HTTPError as e:
                     if e.code == 401:
                         logger.info(f"[outlook-graph] 401 token 过期，重新刷新（folder={folder}）")
+                        _invalidate_token(email, GRAPH_SCOPE)
                         data = _refresh_token_for(cred, GRAPH_SCOPE, email=email)
                         access_token = data["access_token"]
+                        _cache_token(email, GRAPH_SCOPE, access_token, data.get("expires_in"))
                         continue
+                    if e.code in (429, 503):
+                        # 聚合限流：歇 Retry-After 再战，绝不能 raise——
+                        # 一 raise 该账号的 Graph 通道就死了，整池挤进 IMAP 雪崩。
+                        wait = min(max(_retry_after_seconds(e), 2.0), 10.0)
+                        wait = min(wait, max(0.0, deadline - time.time()))
+                        _rate_penalize("graph", cid)
+                        round_slow = True
+                        logger.warning(
+                            f"[outlook-graph] HTTP {e.code}（限流）folder={folder}，歇 {wait:.0f}s 后继续"
+                        )
+                        if wait > 0:
+                            time.sleep(wait)
+                        break
                     if e.code in (400, 403):
                         logger.info(f"[outlook-graph] HTTP {e.code} folder={folder}，跳过")
                         continue
-                    raise
+                    # 其余（500/502/504…）：先当瞬时抖动重试，连续 3 整轮全灭才降级
+                    round_hard_error = e
+                    round_slow = True
+                    logger.warning(f"[outlook-graph] HTTP {e.code} folder={folder}，本轮按瞬时错误处理")
+                    break
                 except TimeoutError:
                     round_slow = True
                     logger.warning(f"[outlook-graph] folder={folder} 查询超 8s 已放弃，本轮降速")
                     continue
                 except Exception:
                     continue
+                round_ok = True
                 for msg in messages:
                     mid = msg.get("id", "")
                     if not mid or mid in seen:
@@ -746,6 +943,9 @@ class OutlookEmailProvider(EmailProvider):
                     # 就没法解析。给独立预算（2 次 × 15s），不占用等待窗口。
                     body = ""
                     for attempt in range(2):
+                        if not _rate_acquire("graph", cid, max_wait=5.0):
+                            logger.info("[outlook-graph] 取正文令牌排队超时，尝试下一次")
+                            continue
                         try:
                             full = _call_with_hard_timeout(
                                 _graph_get_message_rest, 15, access_token, mid)
@@ -772,6 +972,16 @@ class OutlookEmailProvider(EmailProvider):
                         "received_at": recv,
                         "code_source": "rule" if code else "none",
                     }
+            # 整轮战果结算：有成功就清零；连续 3 整轮硬 HTTP 错误才放弃。
+            # （旧版任何一次 5xx 都直接 raise，把瞬时抖动放大成通道死亡。）
+            if round_ok:
+                consecutive_bad_rounds = 0
+            elif round_hard_error is not None:
+                consecutive_bad_rounds += 1
+                if consecutive_bad_rounds >= 3:
+                    raise ProviderError(
+                        f"Graph 连续 {consecutive_bad_rounds} 轮 HTTP {round_hard_error.code}，降级 IMAP"
+                    ) from round_hard_error
             # 轮间等待：原来固定 4s（3 文件夹时一轮本来就要 2s+，加起来快 6s）。
             # 现在 inbox 单文件夹很快，1s 间隔能把轮次拉到 ~10 轮/12s；
             # 本轮有超时就退避到 3s，避免拖慢整池。
@@ -805,8 +1015,6 @@ class OutlookEmailProvider(EmailProvider):
             f" 基线={len(self._baseline_ids)}封 baseline_at={self._baseline_at}"
         )
 
-        cached_token = ""
-        cached_at = 0.0
         deadline = time.time() + timeout
         folders = ["INBOX", "Junk", "Junk Email", "Spam"]
         found_folders: list[str] | None = None
@@ -816,13 +1024,14 @@ class OutlookEmailProvider(EmailProvider):
         while time.time() < deadline:
             M = None
             try:
-                if not cached_token or time.time() - cached_at > 3000:
+                cached_token = _cached_token(email, IMAP_SCOPE)
+                if not cached_token:
                     # 互斥刷新；轮换的新 rt 由 _refresh_token_for 落库。
                     # 刷新失败不再降级密码登录——那是死路，只会白耗 60s
                     # 超时预算并给账号添一次异常登录记录。
                     data = _refresh_token_for(cred, IMAP_SCOPE, email=email)
                     cached_token = data["access_token"]
-                    cached_at = time.time()
+                    _cache_token(email, IMAP_SCOPE, cached_token, data.get("expires_in"))
 
                 last_err: Exception | None = None
                 for host in IMAP_SERVERS:

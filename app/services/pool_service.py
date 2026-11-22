@@ -905,7 +905,9 @@ def snapshot_mail_baseline(db: Session, email: str, project_code: str = "") -> d
     try:
         cred = get_account_credentials(db, key)
         if cred and cred.get("refresh_token") and cred.get("client_id"):
-            from ..providers.outlook import GRAPH_FOLDERS, _graph_list_messages, _request_access_token
+            from ..providers.outlook import (
+                GRAPH_FOLDERS, _graph_list_messages, _rate_acquire, _request_access_token,
+            )
 
             # 先结束当前事务把连接还池：下面是一次网络调用（Graph 拉全文件夹），
             # 拿着连接做网络 I/O 会在并发取号时把 pool_size 耗干（见 claim_account）。
@@ -917,6 +919,9 @@ def snapshot_mail_baseline(db: Session, email: str, project_code: str = "") -> d
             token = data["access_token"]
             for folder in GRAPH_FOLDERS:
                 try:
+                    # 基线抓取同样过出口限流：并发取号时别和收码轮询抢配额
+                    if not _rate_acquire("graph", cred["client_id"], max_wait=5.0):
+                        continue
                     messages = _graph_list_messages(token, folder)
                 except Exception:
                     continue
