@@ -386,11 +386,12 @@ async fn user_login_submit(
     let username = form.username.trim();
 
     let mut error: Option<&str> = None;
-    let mut user_id: Option<i64> = None;
+    // (user_id, 是否管理员角色)
+    let mut user_id: Option<(i64, bool)> = None;
     match billing::get_user_by_name(&st.pool, username).await? {
         Some(u) if u.status == 1 && !u.password_hash.is_empty() => {
             if crate::auth::verify_password(&form.password, &u.password_hash) {
-                user_id = Some(u.id);
+                user_id = Some((u.id, u.role == crate::models::ROLE_ADMIN));
             } else {
                 error = Some("用户名或密码错误");
             }
@@ -399,15 +400,28 @@ async fn user_login_submit(
         None => error = Some("用户名或密码错误"),
     }
 
-    if let Some(uid) = user_id {
+    if let Some((uid, is_admin_role)) = user_id {
         let mut sess = session_from_jar(&jar);
         sess.insert("user_id".into(), json!(uid));
         sess.insert("username".into(), json!(username));
+
+        // role=admin 的账号同时授予后台权限。
+        //
+        // 后台本来是纯口令登录（/login 只认环境变量，没有账号概念），
+        // 但「管理员账号」的预期是：一个账号密码登录，客户中心和管理
+        // 后台都能进。在会话里补 admin_ok 即可 —— `Identity::is_admin`
+        // 认这个标志，所有后台 API/页面自动放行。
+        if is_admin_role {
+            sess.insert("admin_ok".into(), json!(true));
+        }
+
         let cookie = session_cookie(&crate::auth::dumps(&sess));
         // 客户登录后去「购买邮箱」，不是「余额与充值」。
         // 原来跳 /recharges 是照搬 Python 的行为，但客户的第一个动作
         // 几乎总是买号，跳到充值页等于多让人点一次。
-        return Ok((jar.add(cookie), Redirect::to("/app/buy-email")).into_response());
+        // 管理员角色则直接进后台仪表盘。
+        let target = if is_admin_role { "/" } else { "/app/buy-email" };
+        return Ok((jar.add(cookie), Redirect::to(target)).into_response());
     }
 
     // 失败页保留用户输入的用户名（模板 value="{{ username }}"），省得重打
