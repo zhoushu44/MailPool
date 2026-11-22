@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}MailPool{% endblock %} · MailPool 客户中心</title>
+    <title>{% block title %}MailPool{% endblock %} · MailPool</title>
     <link rel="icon" type="image/svg+xml" href="/static/img/logo.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com" media="print" onload="this.media='all'">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
@@ -14,6 +14,7 @@
     {% block head %}{% endblock %}
 </head>
 <body class="customer-view">
+{# 顶栏复刻 MailNest：毛玻璃吸顶 + 药丸导航 + 深色实心按钮 #}
 <header class="cust-header">
     <div class="cust-header-inner">
         <a href="/app/buy-email" class="cust-brand">
@@ -21,15 +22,19 @@
             <span class="cust-brand-text">MailPool<span class="brand-sub">客户中心</span></span>
         </a>
 
+        {% if user_logged_in %}
         <nav class="cust-nav">
             <a href="/app/buy-email" class="cust-nav-item {% if active == 'buy-email' %}active{% endif %}">购买邮箱</a>
-            {% if billing_on %}<a href="/app/orders" class="cust-nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>{% endif %}
+            {% if billing_on %}
+            <a href="/app/orders" class="cust-nav-item {% if active == 'orders' %}active{% endif %}">下单流水</a>
+            {% endif %}
             <a href="/app/recharges" class="cust-nav-item {% if active == 'recharges' %}active{% endif %}">余额与充值</a>
             <a href="/app/balances" class="cust-nav-item {% if active == 'balances' %}active{% endif %}">费用明细</a>
         </nav>
+        {% endif %}
 
         <div class="cust-header-right">
-            {% if user_name %}
+            {% if user_logged_in %}{% if user_name %}
             <span class="cust-user">
                 <span class="cust-user-avatar">{{ user_name[:1]|upper }}</span>
                 {{ user_name }}
@@ -37,6 +42,7 @@
             {% endif %}
             <a href="/docs/api-overview" target="_blank" class="btn btn-ghost btn-sm">API 文档</a>
             <a href="/app/logout" class="btn btn-sm">退出</a>
+            {% endif %}
         </div>
     </div>
 </header>
@@ -45,10 +51,8 @@
     {% block content %}{% endblock %}
 </main>
 
-{# 移动端底部标签栏：只在窄屏显示（桌面端由 CSS 隐藏）。
-   顶栏导航在 390px 宽下会被「API 文档 / 退出」挤掉，
-   所以移动端改用拇指可达的底部栏，这是移动端标准做法。 #}
-<nav class="cust-bottomnav">
+{# 移动端底部标签栏（桌面端由 CSS 隐藏） #}
+{% if user_logged_in %}<nav class="cust-bottomnav">
     <a href="/app/buy-email" class="cust-bottomnav-item {% if active == 'buy-email' %}active{% endif %}">
         <span class="cust-bottomnav-ico">◈</span>购买邮箱
     </a>
@@ -63,7 +67,7 @@
     <a href="/app/balances" class="cust-bottomnav-item {% if active == 'balances' %}active{% endif %}">
         <span class="cust-bottomnav-ico">▦</span>费用明细
     </a>
-</nav>
+</nav>{% endif %}
 
 <footer class="cust-footer">
     <span>MailPool 客户中心</span>

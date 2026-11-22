@@ -1,5 +1,5 @@
 {% extends "base_customer.html" %}
-{% block title %}选择项目{% endblock %}
+{% block title %}购买邮箱{% endblock %}
 {% block content %}
 <div class="mn-list-head">
     <div>
@@ -14,9 +14,7 @@
     </div>
 </div>
 
-{# 三步流程提示：对齐 MailNest 首页的「三步完成一次邮箱验证」，
-   比原来那一大段技术说明更容易理解。
-   技术细节（域名过滤/正文过滤）移到 docs，客户不需要看。 #}
+{# 三步流程：复刻 MailNest 首页「三步完成一次邮箱验证」的三卡布局 #}
 <div class="cust-steps">
     <div class="cust-step">
         <span class="cust-step-num">1</span>
@@ -49,13 +47,15 @@
             <div class="mn-mall-info">
                 <div class="mn-mall-name">{{ p.name or p.code }}</div>
                 <div class="mn-mall-row">
-                    {# 「库存」改成「可用」：这个数字是共享池里本项目还能取的量，
-                       叫「库存」会被理解成独占数量 #}
-                    <span class="mn-mall-avail">
-                        {% if p.available is not none %}
-                            {% if p.available > 0 %}可用 {{ p.available }}{% else %}<span class="mn-mall-out">暂时缺货</span>{% endif %}
-                        {% else %}可用{% endif %}
-                    </span>
+                    {% if p.available is not none %}
+                        {% if p.available > 0 %}
+                        <span class="mn-mall-avail">可用 {{ p.available }}</span>
+                        {% else %}
+                        <span class="mn-mall-avail mn-mall-out">暂时缺货</span>
+                        {% endif %}
+                    {% else %}
+                    <span class="mn-mall-avail">可用</span>
+                    {% endif %}
                     {% if p.card_duration and p.card_duration|int > 0 %}
                     <span class="mn-mall-dur">{% if p.card_duration|int >= 60 %}{{ p.card_duration|int // 60 }} 分钟有效{% else %}{{ p.card_duration }} 秒有效{% endif %}</span>
                     {% endif %}
@@ -70,16 +70,15 @@
         <div class="mn-mall-foot">
             <div class="mn-mall-price">
                 {% if billing_on %}
-                <div class="mn-mall-price-now">￥{{ p.card_price }}</div>
+                <span class="mn-mall-price-now">￥{{ p.card_price }}</span>
                 {% if p.card_original_price %}
-                <div class="mn-mall-price-origin">￥{{ p.card_original_price }}</div>
+                <span class="mn-mall-price-origin">￥{{ p.card_original_price }}</span>
                 {% endif %}
                 {% else %}
-                {# 计费关闭时只显示「免费」，不再跟一个自相矛盾的 ￥0.0000 #}
-                <div class="mn-mall-price-now mn-mall-free">免费</div>
+                <span class="mn-mall-price-now mn-mall-free">免费</span>
                 {% endif %}
             </div>
-            <button class="btn mn-mall-buy" {% if not p.enabled %}disabled{% endif %}
+            <button class="mn-mall-buy" {% if not p.enabled %}disabled{% endif %}
                     onclick='buyEmail({{ p.code|tojson }})'>{% if p.enabled %}获取邮箱{% else %}停用{% endif %}</button>
         </div>
     </div>
@@ -101,7 +100,6 @@ async function buyEmail(code) {
             body: JSON.stringify({ project_code: code })
         });
         if (r.code === '00000' && r.data && r.data.email) {
-            // 直接进收件页（带项目与邮箱），省掉「再点一次去看邮件」
             location.href = '/app/mailbox?project_code=' + encodeURIComponent(code)
                           + '&email=' + encodeURIComponent(r.data.email);
             return;
