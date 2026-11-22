@@ -218,6 +218,24 @@ fn build_client(cred: &Credentials) -> AppResult<reqwest::Client> {
 }
 
 /// 同步的 IMAP 轮询（跑在阻塞线程池里）。
+/// 同步的 IMAP 轮询（跑在阻塞线程池里）。
+///
+/// ## 返回语义（三态，必须严格区分）
+///
+/// - `Ok(Some(hit))` —— 拿到码
+/// - `Ok(None)` —— **干净超时**：至少成功连上过一次并扫完，就是没新信
+/// - `Err(...)` —— **通道失败**：一个服务器都没成功连上（无 scope / 认证失败）
+///
+/// ## 为什么必须区分后两者
+///
+/// 原实现把「所有服务器都认证失败」也归进 `Ok(None)`（continue 到底），
+/// 结果是：调用方以为是「干净超时」，不去 Graph 兜底，白等满整个 timeout。
+///
+/// 实测（2026-11-22）：`Bad Response: Command Argument Error. 12` 连续出现
+/// 20 秒，最后返回 `IMAP 车道无新信` —— 号明明有 Graph 可用，却一次都没试。
+///
+/// 现在：**第一轮全部失败且没有任何一次成功连接** → 直接返回 Err，
+/// 让上层立刻去 Graph 兜底。
 fn poll_imap_sync(
     email: &str,
     token: &str,
@@ -225,10 +243,12 @@ fn poll_imap_sync(
     patterns: &[regex::Regex],
     deadline: Instant,
 ) -> AppResult<Option<Hit>> {
-    let client_id = "";
-    let _ = client_id;
+    let mut any_connected = false;
+    let mut last_error = String::new();
 
     while Instant::now() < deadline {
+        let mut round_connected = false;
+
         for server in IMAP_SERVERS {
             let remain = deadline.saturating_duration_since(Instant::now());
             if remain.is_zero() {
@@ -237,15 +257,27 @@ fn poll_imap_sync(
 
             match poll_one_server(server, email, token, opts, patterns, remain) {
                 Ok(Some(hit)) => return Ok(Some(hit)),
-                Ok(None) => continue, // 这个服务器没新信，换下一个
+                Ok(None) => {
+                    // 连上并扫完了，只是没新信
+                    any_connected = true;
+                    round_connected = true;
+                }
                 Err(ImapError::Fatal(msg)) => {
+                    // 认证失败：这是「通道不可用」，不是「没新信」
                     return Err(AppError::bad_gateway(format!("IMAP 凭据失效: {msg}")));
                 }
                 Err(e) => {
+                    last_error = e.to_string();
                     tracing::info!("[imap] {server} 失败: {e}");
-                    continue;
                 }
             }
+        }
+
+        // 关键判定：一轮下来一个服务器都没连上 → 通道不可用，立刻返回
+        if !round_connected && !any_connected {
+            return Err(AppError::bad_gateway(format!(
+                "IMAP 全部服务器不可用: {last_error}"
+            )));
         }
 
         let remain = deadline.saturating_duration_since(Instant::now());
@@ -254,6 +286,8 @@ fn poll_imap_sync(
             std::thread::sleep(sleep);
         }
     }
+
+    // 走到这里：至少成功连过（any_connected = true），只是没新信
     Ok(None)
 }
 

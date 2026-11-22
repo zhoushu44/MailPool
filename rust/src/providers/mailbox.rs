@@ -2,19 +2,44 @@
 //!
 //! 这是「取码」的唯一入口。上层（API / 定时任务）只调 [`wait_mail`]。
 //!
-//! ## 降级规则（对齐 Python `_wait_mail_sync`）
+//! ## 路由策略（2026-11-22 对齐 Python 版）：**IMAP 优先，Graph 兜底**
 //!
 //! ```text
-//! Graph 通道
-//!   ├─ 拿到码           → 返回
-//!   ├─ 凭据失效(Fatal)  → 直接报错，不降级（号废了，降级也救不回）
-//!   ├─ 车道满 / 连续失败 → 降级 IMAP
-//!   └─ 超时未等到        → 用剩余时间跑 IMAP（不是从零开始）
+//! 取号 → 有 OAuth 凭据？
+//!   ├─ 无 → IMAP 直接 fatal（basic auth 被微软禁了，本来就没路）
+//!   ├─ 已标记无 IMAP scope → Graph 直连（令牌桶排队，不会雪崩）
+//!   └─ 未标记 → IMAP 优先，整个等待窗口给 IMAP
+//!         ├─ 命中 → 返回验证码
+//!         ├─ 干净跑完没新信 → 返回 None（INBOX/junk 都扫了，Graph 重扫也是空）
+//!         └─ 失败 → 记进无 scope 名单 + 剩余预算走 Graph 兜底（永不判死）
 //! ```
 //!
-//! **关键**：两条通道共用一个总超时预算。Python 版曾经让 Graph 和 IMAP
-//! 各自跑满 timeout，`timeout=5` 实际用了 16.6s。这里必须算剩余时间。
+//! ### 为什么 IMAP 做主车道
+//!
+//! - IMAP 走 `outlook.office365.com:993`，**没有 client_id 级聚合限流**
+//!   （基准实测 21 并发满速零错误）
+//! - Graph 单 client_id 聚合 ~10 rps 封顶，只留给无 IMAP scope 的号和兜底
+//!
+//! ### 关键：三种结果必须区分清楚
+//!
+//! 这是移植时最容易做错的地方。IMAP 车道跑完可能返回三种状态：
+//!
+//! | 结果 | 含义 | 后续动作 |
+//! |---|---|---|
+//! | `Hit` | 拿到码 | 返回 |
+//! | `Clean` | 干净超时（扫完了，就是没新信） | **直接返回 None，不要再跑 Graph** |
+//! | `Failed` | 通道本身坏了（无 scope / 认证失败 / 网络） | 标记无 scope + Graph 兜底 |
+//!
+//! 如果不区分 `Clean` 和 `Failed`，要么会把「没新信」误判成「无 scope」
+//! 污染名单，要么会对同一个邮箱白扫一遍 Graph。
+//!
+//! ### 踩过的坑
+//!
+//! 1. 原来两条通道各自跑满 timeout → `timeout=5` 实际用了 16.6 秒
+//! 2. 一条通道干净跑完（只是没新信）后不再用另一条重扫同一邮箱
 
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
@@ -22,11 +47,63 @@ use crate::providers::graph::{self, GraphError, Hit, Mail, WaitOptions};
 use crate::providers::imap;
 use crate::providers::outlook::Credentials;
 
+/// 已知没有 IMAP scope 的账号（邮箱小写）。
+///
+/// 第一次给某号刷 IMAP token 被微软拒绝时记进来，之后这个号直接走 Graph，
+/// 不再浪费一次注定失败的刷新（省 1~2 秒）。
+///
+/// **只放内存**（对齐 Python `_imap_no_scope`）：重启后重新学一遍。
+/// 放进数据库要多一张表 + 清理逻辑，而重新学习的代价只是每个号多花 1~2 秒一次。
+static IMAP_NO_SCOPE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn no_scope_set() -> &'static Mutex<HashSet<String>> {
+    IMAP_NO_SCOPE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 该邮箱是否已被标记为「无 IMAP scope」。
+pub fn is_no_imap_scope(email: &str) -> bool {
+    no_scope_set()
+        .lock()
+        .unwrap()
+        .contains(&email.trim().to_ascii_lowercase())
+}
+
+/// 标记为「无 IMAP scope」。
+pub fn mark_no_imap_scope(email: &str) {
+    no_scope_set()
+        .lock()
+        .unwrap()
+        .insert(email.trim().to_ascii_lowercase());
+}
+
+/// 清空名单（测试用）。
+#[cfg(test)]
+pub fn clear_no_imap_scope() {
+    no_scope_set().lock().unwrap().clear();
+}
+
+/// IMAP 车道的三种结局。
+enum ImapOutcome {
+    /// 拿到码
+    Hit(Box<Hit>),
+    /// 干净超时：扫完了就是没新信
+    Clean,
+    /// 通道失败（无 scope / 认证失败 / 网络），可以去 Graph 兜底
+    Failed(String),
+}
+
 /// 两条通道都试过但没等到（正常轮询结果）。
 pub struct WaitResult {
     pub hit: Option<Hit>,
     /// 走过哪些通道（日志/诊断用）
     pub path: Vec<&'static str>,
+}
+
+impl WaitResult {
+    fn none(mut path: Vec<&'static str>) -> Self {
+        path.shrink_to_fit();
+        Self { hit: None, path }
+    }
 }
 
 /// 等一封验证码邮件。
@@ -39,60 +116,93 @@ pub async fn wait_mail(
     opts: &WaitOptions,
 ) -> AppResult<WaitResult> {
     let started = Instant::now();
-    let mut path = Vec::new();
+    let mut path: Vec<&'static str> = Vec::new();
+    tracing::info!("[mail] 取件开始 email={email} timeout={:?}", opts.timeout);
 
-    // ── 第一通道：Graph ──
-    path.push("graph");
-    tracing::info!("[mail] 取件开始 email={} timeout={:?}", email, opts.timeout);
+    // ── 前置：有 OAuth 凭据吗 ──
+    if !cred.is_complete() {
+        // 无 OAuth 凭据：IMAP 直接 fatal（basic auth 已被微软禁用，无路可走）
+        path.push("imap");
+        let err = imap::wait_code_imap(cred, email, opts).await.err();
+        return Err(err.unwrap_or_else(|| {
+            AppError::bad_gateway(format!("凭据无效且 IMAP 不可用: {email}"))
+        }));
+    }
 
-    match graph::wait_code_graph(cred, email, opts).await {
-        Ok(Some(hit)) => {
+    // ── 已标记无 IMAP scope → Graph 直连 ──
+    if is_no_imap_scope(email) {
+        path.push("graph");
+        tracing::debug!("[mail] {email} 已标记无 IMAP scope，直接走 Graph");
+        return match graph::wait_code_graph(cred, email, opts).await {
+            Ok(Some(hit)) => Ok(WaitResult {
+                hit: Some(hit),
+                path,
+            }),
+            Ok(None) => Ok(WaitResult::none(path)),
+            Err(GraphError::Fatal(msg)) => {
+                Err(AppError::bad_gateway(format!("凭据失效: {msg}")))
+            }
+            Err(e) => {
+                tracing::warn!("[mail] Graph 直连失败: {e}");
+                Ok(WaitResult::none(path))
+            }
+        };
+    }
+
+    // ── IMAP 优先：整个等待窗口给 IMAP ──
+    path.push("imap");
+    let outcome = run_imap_lane(cred, email, opts).await;
+
+    match outcome {
+        ImapOutcome::Hit(hit) => {
             tracing::info!(
-                "[mail] Graph 命中 email={} code={} 耗时 {:.1}s",
+                "[mail] IMAP 命中 email={} code={} 耗时 {:.1}s",
                 email,
                 mask_code(&hit.code),
                 started.elapsed().as_secs_f64()
             );
             return Ok(WaitResult {
-                hit: Some(hit),
+                hit: Some(*hit),
                 path,
             });
         }
-        Ok(None) => {
+        ImapOutcome::Clean => {
+            // 干净跑完没新信：INBOX/junk 都扫过了，Graph 重扫也是空。
+            // **不再跑 Graph** —— 这正是「两条通道各自跑满 timeout」的坑。
             tracing::info!(
-                "[mail] Graph 通道无新信（耗时 {:.1}s），转 IMAP",
+                "[mail] IMAP 车道无新信（耗时 {:.1}s）",
                 started.elapsed().as_secs_f64()
             );
+            return Ok(WaitResult::none(path));
         }
-        Err(GraphError::Fatal(msg)) => {
-            // 凭据失效：号废了，不浪费 IMAP 的时间
-            return Err(AppError::bad_gateway(format!("凭据失效: {msg}")));
-        }
-        Err(e) => {
+        ImapOutcome::Failed(reason) => {
+            // 首次失败即记忆（保守：瞬时网络抖动也会被记，代价只是此号
+            // 以后走 Graph 排队；换来的是不会再烧一次注定失败的刷新）
+            mark_no_imap_scope(email);
             tracing::info!(
-                "[mail] Graph 通道不可用（{e}），转 IMAP（耗时 {:.1}s）",
-                started.elapsed().as_secs_f64()
+                "[mail] IMAP 车道失败，标记无 scope 并退回 Graph 兜底：{}",
+                crate::util::truncate_chars(&reason, 80)
             );
         }
     }
 
-    // ── 第二通道：IMAP（用剩余时间）──
+    // ── Graph 兜底：用剩余预算 ──
     let remaining = opts.timeout.saturating_sub(started.elapsed());
-    if remaining < Duration::from_secs(3) {
-        tracing::info!("[mail] 剩余时间不足以跑 IMAP（{remaining:?}），返回超时");
-        return Ok(WaitResult { hit: None, path });
+    if remaining < Duration::from_secs(1) {
+        tracing::info!("[mail] 时间预算已用尽，返回 None");
+        return Ok(WaitResult::none(path));
     }
-    path.push("imap");
 
-    let imap_opts = WaitOptions {
+    path.push("graph");
+    let graph_opts = WaitOptions {
         timeout: remaining,
         ..opts.clone()
     };
 
-    match imap::wait_code_imap(cred, email, &imap_opts).await {
+    match graph::wait_code_graph(cred, email, &graph_opts).await {
         Ok(Some(hit)) => {
             tracing::info!(
-                "[mail] IMAP 命中 email={} code={} 总耗时 {:.1}s",
+                "[mail] Graph 兜底命中 email={} code={} 总耗时 {:.1}s",
                 email,
                 mask_code(&hit.code),
                 started.elapsed().as_secs_f64()
@@ -108,14 +218,32 @@ pub async fn wait_mail(
                 email,
                 started.elapsed().as_secs_f64()
             );
-            Ok(WaitResult { hit: None, path })
+            Ok(WaitResult::none(path))
+        }
+        Err(GraphError::Fatal(msg)) => {
+            Err(AppError::bad_gateway(format!("凭据失效: {msg}")))
         }
         Err(e) => {
-            // IMAP 也失败：但如果 Graph 是「超时」而不是「不可用」，
-            // 应该返回超时（正常结果），而不是抛错中断注册流程。
-            tracing::warn!("[mail] IMAP 也失败: {e}");
-            Ok(WaitResult { hit: None, path })
+            tracing::warn!("[mail] Graph 兜底也失败: {e}");
+            Ok(WaitResult::none(path))
         }
+    }
+}
+
+/// 跑 IMAP 车道，并把 `AppResult` 归一成「可以决定下一步」的三态。
+///
+/// **关键**：`wait_code_imap` 的错误被吞成 `Failed`，因为 IMAP 失败不代表
+/// 这个号废了（可能只是没 scope），必须能去 Graph 兜底。
+/// 但「干净返回 None」要保留为 `Clean`，否则会对同一邮箱白扫一遍 Graph。
+async fn run_imap_lane(
+    cred: &mut Credentials,
+    email: &str,
+    opts: &WaitOptions,
+) -> ImapOutcome {
+    match imap::wait_code_imap(cred, email, opts).await {
+        Ok(Some(hit)) => ImapOutcome::Hit(Box::new(hit)),
+        Ok(None) => ImapOutcome::Clean,
+        Err(e) => ImapOutcome::Failed(e.to_string()),
     }
 }
 
@@ -194,6 +322,64 @@ pub async fn fetch_messages(
 
 #[cfg(test)]
 mod tests {
+
+    // ────────────────────────────────────────────────────────────
+    //  路由语义回归（对齐 Python TestDualLane 的 4 个用例）
+    // ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn no_scope_mark_is_case_insensitive() {
+        clear_no_imap_scope();
+        mark_no_imap_scope("Foo@Bar.TEST");
+        assert!(is_no_imap_scope("foo@bar.test"));
+        assert!(is_no_imap_scope("  FOO@BAR.TEST  "));
+        assert!(!is_no_imap_scope("other@bar.test"));
+        clear_no_imap_scope();
+    }
+
+    #[test]
+    fn no_scope_does_not_leak_between_accounts() {
+        clear_no_imap_scope();
+        mark_no_imap_scope("a@test.com");
+        assert!(!is_no_imap_scope("b@test.com"), "标记不能串号");
+        clear_no_imap_scope();
+    }
+
+    #[tokio::test]
+    async fn no_oauth_credentials_goes_imap_first_and_errors() {
+        // 无 OAuth 凭据 → 直接返回 Err（IMAP 也救不了：basic auth 被禁用）
+        clear_no_imap_scope();
+        let mut cred = Credentials::default(); // 空凭据
+        let opts = WaitOptions {
+            timeout: Duration::from_millis(200),
+            ..Default::default()
+        };
+        let r = wait_mail(&mut cred, "nocred@test.com", &opts).await;
+        assert!(r.is_err(), "无凭据应返回错误，实际 {r:?}", r = r.map(|x| x.hit.is_some()));
+    }
+
+    #[test]
+    fn imap_outcome_three_states_are_distinct() {
+        // 这是个「契约测试」：三种结局必须是三个不同分支。
+        // 如果将来有人把 Clean 和 Failed 合并，这个测试的编译就会失败
+        // （因为 match 会不完整）。
+        fn classify(o: &ImapOutcome) -> &'static str {
+            match o {
+                ImapOutcome::Hit(_) => "hit",
+                ImapOutcome::Clean => "clean",
+                ImapOutcome::Failed(_) => "failed",
+            }
+        }
+        assert_eq!(classify(&ImapOutcome::Clean), "clean");
+        assert_eq!(classify(&ImapOutcome::Failed("x".into())), "failed");
+    }
+
+    #[test]
+    fn wait_result_none_has_empty_hit() {
+        let r = WaitResult::none(vec!["imap"]);
+        assert!(r.hit.is_none());
+        assert_eq!(r.path, vec!["imap"]);
+    }
     use super::*;
 
     #[test]
