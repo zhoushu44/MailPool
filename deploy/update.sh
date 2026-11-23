@@ -15,6 +15,32 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# ⚠️ 降级保护
+#
+# 生产自 2026-11-22 起跑的是 Rust 版（mailpool-rust:*），不是这个脚本
+# 拉的 Python 镜像（zhoushu1/mailpool:1.0）。直接跑本脚本 = 把生产
+# 从 Rust 换回 Python，而且服务会“看起来正常”，不会被发现。
+#
+# 要部署 Rust 版请用：bash deploy/build-rust.sh
+#
+# 确实需要回退到 Python 版时，显式加 ALLOW_PYTHON_DOWNGRADE=1：
+#   ALLOW_PYTHON_DOWNGRADE=1 bash deploy/update.sh
+# ---------------------------------------------------------------------------
+if [ "${ALLOW_PYTHON_DOWNGRADE:-0}" != "1" ]; then
+    cat >&2 <<'EOF'
+❌ 拒绝执行：本脚本部署的是 Python 版镜像，会覆盖当前的 Rust 版生产环境。
+
+  部署 Rust 版（正常路径）：
+      cd /opt/mailpool-src && bash deploy/build-rust.sh
+
+  确实要回退到 Python 版：
+      ALLOW_PYTHON_DOWNGRADE=1 bash deploy/update.sh
+
+EOF
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
 # 配置（可用环境变量覆盖）
 # ---------------------------------------------------------------------------
 IMAGE="${IMAGE:-zhoushu1/mailpool}"
