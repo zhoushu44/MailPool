@@ -558,8 +558,16 @@ async fn check_owns_email(
     if !billing_on {
         return Ok(pool::used_by_project(pool_ref, email, project_code).await?);
     }
+    // 匿名 key（无归属用户的老 key）回退到老规则：邮箱绑定过该项目即可。
+    //
+    // 为什么必须放行：buy 对匿名 key 是放行的（无法冻结、不建订单），
+    // 如果这里严查「订单属于当前用户」，就会出现「买的时候行、收的时候
+    // 403」的自相矛盾 —— 实测 2026-11-23：开了计费后第三方用老 key
+    // 全部撞上这个。买/收必须同一口径。
+    //
+    // 登录用户（user_id 存在）仍走严格的订单归属校验。
     let Some(uid) = identity.user_id else {
-        return Ok(false);
+        return Ok(pool::used_by_project(pool_ref, email, project_code).await?);
     };
     let order = billing::find_order(pool_ref, email, Some(project_code)).await?;
     Ok(matches!(order, Some(o) if o.user_id == uid))
