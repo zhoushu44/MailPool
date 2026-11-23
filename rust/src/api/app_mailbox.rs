@@ -119,7 +119,12 @@ async fn my_emails(
     // `ambiguous column name: email` —— 因为 email_accounts(a)、
     // email_orders(o) 和子查询里都有 email，SQLite 无法判断指哪个。
     let rows: Vec<(String, String, String, Option<chrono::NaiveDateTime>)> = sqlx::query_as(
-        "SELECT sub.mail, sub.proj, COALESCE(a.pool_status, 'unknown') AS st, sub.ts \
+        // GROUP BY 邮箱去重：同一个号可能既有 order 又有多个项目下的
+        // usage 记录，UNION 因 ts 不同去不掉重，界面上会出现同一个
+        // 邮箱好几行（实测 zs 的 4 个号显示成 8 行）。
+        // SQLite 里 MAX() 聚合时其余列取自最大值那一行，正好是「最近一次」。
+        "SELECT sub.mail, sub.proj, COALESCE(a.pool_status, 'unknown') AS st, \
+                MAX(sub.ts) AS ts \
          FROM ( \
              SELECT o.email AS mail, o.project_code AS proj, o.created_at AS ts \
              FROM email_orders o WHERE o.user_id = ? \
@@ -137,7 +142,8 @@ async fn my_emails(
              WHERE x.user_id = ? AND x.status = 'active' \
          ) AS sub \
          LEFT JOIN email_accounts a ON lower(a.email) = lower(sub.mail) \
-         ORDER BY sub.ts DESC LIMIT ?",
+         GROUP BY lower(sub.mail) \
+         ORDER BY MAX(sub.ts) DESC LIMIT ?",
     )
     .bind(uid)
     .bind(uid)
