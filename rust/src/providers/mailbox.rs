@@ -77,10 +77,21 @@ pub fn mark_no_imap_scope(email: &str) {
 }
 
 /// 清空名单（测试用）。
+///
+/// **必须传入 [`NoScopeTestGuard`]**：这个函数会清空全局名单，
+/// 如果测试不持锁就调用，会抹掉并行测试刚标记的条目 ——
+/// 实测在 CI 上稳定复现（`no_scope_mark_is_case_insensitive` 挂）。
+///
+/// 参数不是摆设：调用方必须先把 guard 拿在手里，
+/// 忘了加锁会**编译不过**，而不是在 CI 上偶发失败。
 #[cfg(test)]
-pub fn clear_no_imap_scope() {
+pub fn clear_no_imap_scope(_guard: &crate::providers::mailbox::NoScopeTestGuard) {
     no_scope_set().lock().unwrap().clear();
 }
+
+/// 测试用的全局锁 guard（见 [`clear_no_imap_scope`] 的说明）。
+#[cfg(test)]
+pub type NoScopeTestGuard = std::sync::MutexGuard<'static, ()>;
 
 /// IMAP 车道的三种结局。
 enum ImapOutcome {
@@ -332,7 +343,8 @@ mod tests {
     /// 用一把全局锁把这类测试串起来，比改成 `#[serial]` 少引一个 crate。
     static NO_SCOPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn lock_no_scope() -> std::sync::MutexGuard<'static, ()> {
+    /// 拿锁。返回值必须活着到测试结束（绑到变量，别用 `_`）。
+    fn lock_no_scope() -> super::NoScopeTestGuard {
         NO_SCOPE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -343,27 +355,29 @@ mod tests {
     #[test]
     fn no_scope_mark_is_case_insensitive() {
         let _g = lock_no_scope();
-        clear_no_imap_scope();
+        clear_no_imap_scope(&_g);
         mark_no_imap_scope("Foo@Bar.TEST");
         assert!(is_no_imap_scope("foo@bar.test"));
         assert!(is_no_imap_scope("  FOO@BAR.TEST  "));
         assert!(!is_no_imap_scope("other@bar.test"));
-        clear_no_imap_scope();
+        clear_no_imap_scope(&_g);
     }
 
     #[test]
     fn no_scope_does_not_leak_between_accounts() {
         let _g = lock_no_scope();
-        clear_no_imap_scope();
+        clear_no_imap_scope(&_g);
         mark_no_imap_scope("a@test.com");
         assert!(!is_no_imap_scope("b@test.com"), "标记不能串号");
-        clear_no_imap_scope();
+        clear_no_imap_scope(&_g);
     }
 
     #[tokio::test]
     async fn no_oauth_credentials_goes_imap_first_and_errors() {
         // 无 OAuth 凭据 → 直接返回 Err（IMAP 也救不了：basic auth 被禁用）
-        clear_no_imap_scope();
+        // 这个测试也清空全局名单，必须持锁
+        let _g = lock_no_scope();
+        clear_no_imap_scope(&_g);
         let mut cred = Credentials::default(); // 空凭据
         let opts = WaitOptions {
             timeout: Duration::from_millis(200),

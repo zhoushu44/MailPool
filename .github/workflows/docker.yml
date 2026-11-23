@@ -131,7 +131,10 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          # Docker Hub 用户名没配时，用本地占位命名空间，避免拼出
+          # "/mailpool-rust:latest" 这种非法标签（buildx 会直接报
+          # invalid reference format，把整个 CI 拖红）
+          images: ${{ secrets.DOCKER_HUB_USERNAME || 'mailpool-local' }}/${{ env.IMAGE_NAME }}
           # 版本号不硬编码，避免和 git tag 漂移：
           #   push tag v3.2.1 → 生成 3.2.1
           #   推 main        → latest + sha-xxxxxxx
