@@ -96,7 +96,7 @@
 {% endif %}
 {% endblock %}
 
-
+{% block scripts %}
 <style>
 /* 项目代码行：等宽小字 + 复制按钮，不抢主视觉 */
 .mn-mall-code-line {
@@ -134,7 +134,6 @@
 .mn-copy-btn:active { transform: scale(.97); }
 </style>
 
-{% block scripts %}
 <script>
 function copyProjectCode(ev, code) {
     ev.stopPropagation();
