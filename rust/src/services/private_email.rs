@@ -168,8 +168,8 @@ pub async fn verify_credentials(
         extra: serde_json::Map::new(),
     };
 
-    // 1) 刷 token（失败 = 凭据无效）
-    crate::providers::outlook::access_token(
+    // 刷新 token —— 失败即凭据无效，一步到位
+    let token = crate::providers::outlook::access_token(
         http,
         &mut cred,
         crate::providers::outlook::GRAPH_SCOPE,
@@ -178,37 +178,50 @@ pub async fn verify_credentials(
     .await
     .map_err(|e| format!("token 刷新失败: {}", crate::util::truncate_chars(&e.to_string(), 120)))?;
 
-    // 2) Graph /me 拿真实邮箱
-    let token = crate::providers::outlook::access_token(
-        http,
-        &mut cred,
-        crate::providers::outlook::GRAPH_SCOPE,
-        "verify@private",
-    )
-    .await
-    .map_err(|e| format!("二次取 token 失败: {e}"))?;
+    // 从 JWT payload 里取真实邮箱。
+    //
+    // 不用 Graph /me：这个 client_id 的授权只有收信权限（没有 User.Read），
+    // 实测 /me 返回 401 —— 但读邮件（/me/messages）一直是好的，
+    // 说明号本身能用。JWT 是微软自己签发的，claims 里的
+    // preferred_username 就是账号地址，解出来即可，无需网络请求。
+    jwt_email(&token).ok_or_else(|| "token 里没有邮箱信息（claims 缺 preferred_username）".to_string())
+}
 
-    let resp = http
-        .get("https://graph.microsoft.com/v1.0/me")
-        .header("Authorization", format!("Bearer {token}"))
-        .timeout(std::time::Duration::from_secs(20))
-        .send()
-        .await
-        .map_err(|e| format!("Graph /me 请求失败: {e}"))?;
+/// 解 access_token（JWT）的 payload，取账号地址。
+///
+/// 不校验签名 —— token 是刚从微软 token 端点拿到的（TLS 保证来源），
+/// 这里只是读自己的 claims，不是鉴权场景。
+fn jwt_email(token: &str) -> Option<String> {
+    let payload_b64 = token.split('.').nth(1)?;
+    // JWT 用 URL-safe base64，无 padding
+    let bytes = base64url_decode(payload_b64)?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    for key in ["preferred_username", "upn", "email", "unique_name"] {
+        if let Some(v) = claims.get(key).and_then(|v| v.as_str()) {
+            let v = v.trim().to_ascii_lowercase();
+            if v.contains('@') {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
 
-    if !resp.status().is_success() {
-        return Err(format!("Graph /me 返回 {}", resp.status()));
+/// URL-safe base64 解码（无 padding）。
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut buf = String::with_capacity(input.len() + 4);
+    for c in input.chars() {
+        match c {
+            '-' => buf.push('+'),
+            '_' => buf.push('/'),
+            _ => buf.push(c),
+        }
     }
-    let me: serde_json::Value = resp.json().await.map_err(|e| format!("解析 /me 失败: {e}"))?;
-    let real = me
-        .get("userPrincipalName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if real.is_empty() {
-        return Err("/me 未返回 userPrincipalName".to_string());
+    while buf.len() % 4 != 0 {
+        buf.push('=');
     }
-    Ok(real)
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(buf.as_bytes()).ok()
 }
 
 /// 上传一条（验证后入库）。已存在则更新凭据并重置状态。
@@ -329,7 +342,7 @@ pub async fn reverify(
             let real_low = real.to_ascii_lowercase();
             let declared = email.trim().to_ascii_lowercase();
             if real_low != declared {
-                (String::new(), format!("实际地址为 {real_low}，与记录不一致"))
+                (String::new(), format!("token 实际属于 {real_low}，与记录不一致"))
             } else {
                 ("active".to_string(), String::new())
             }
@@ -389,6 +402,41 @@ pub async fn credentials_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jwt_email_extracts_preferred_username() {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::STANDARD
+            .encode(br#"{"typ":"JWT","preferred_username":"A@X.test"}"#);
+        let jwt = format!("eyJh.{payload}.sig");
+        assert_eq!(jwt_email(&jwt).unwrap(), "a@x.test", "应取出并转小写");
+    }
+
+    #[test]
+    fn jwt_email_tries_fallback_keys() {
+        use base64::Engine;
+        let payload =
+            base64::engine::general_purpose::STANDARD.encode(br#"{"upn":"b@y.test"}"#);
+        let jwt = format!("h.{payload}.s");
+        assert_eq!(jwt_email(&jwt).unwrap(), "b@y.test");
+    }
+
+    #[test]
+    fn jwt_email_rejects_token_without_email() {
+        use base64::Engine;
+        let payload = base64::engine::general_purpose::STANDARD.encode(br#"{"aud":"x"}"#);
+        let jwt = format!("h.{payload}.s");
+        assert!(jwt_email(&jwt).is_none());
+    }
+
+    #[test]
+    fn base64url_handles_url_safe_chars() {
+        use base64::Engine;
+        let orig = br#"{"email":"c@z.test"}"#;
+        let enc = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(orig);
+        let dec = base64url_decode(&enc).unwrap();
+        assert_eq!(dec, orig);
+    }
 
     #[test]
     fn parses_four_field_lines() {
