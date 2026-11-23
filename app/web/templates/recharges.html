@@ -247,7 +247,16 @@ async function submitTopup() {
             body: JSON.stringify({ amount: amount, pay_type: payType }),
         });
         const d = res.data;
-        _payUrl = d.url || '';
+        // 易支付模式：url 是裸的 submit.php，参数要自己拼上，
+        // 否则二维码扫出来是网关首页，付不了款。
+        if (d.params && Object.keys(d.params).length) {
+            const qs = Object.entries(d.params)
+                .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+                .join('&');
+            _payUrl = (d.url || '') + '?' + qs;
+        } else {
+            _payUrl = d.url || '';
+        }
         _payTradeNo = d.trade_no || '';
         const typeName = document.querySelector(`input[name="mn-paytype"][value="${payType}"]`)
             ?.parentElement?.innerText?.trim() || payType;
