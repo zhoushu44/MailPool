@@ -281,9 +281,24 @@ pub async fn hold(
 ) -> AppResult<EmailOrder> {
     let email = email.trim().to_ascii_lowercase();
 
-    // 已存在订单 → 直接返回（对齐 Python `hold` 的幂等分支）
-    if let Some(existing) = find_order_any(pool, &email).await? {
-        return Ok(existing);
+    // 幂等分支：必须按 (邮箱, 项目) 查，且必须是**同一个用户**。
+    //
+    // 原来只按邮箱查（find_order_any），实测后果：
+    //   jacobreed9j77810l@outlook.com 在 z-ai001 下已有别人的 charged 订单，
+    //   新用户买它做 chatgpt001 时 hold 直接返回那条旧订单 ——
+    //   不冻结、不建单、我的邮箱列表看不到、也不扣费。跨用户串单。
+    //
+    // 正确语义：
+    //   同 (email, project) 且同用户 → 幂等返回
+    //   同 (email, project) 不同用户 → 该号已被别人占用，报冲突
+    //   不同 project                → 正常新建（表上 UNIQUE 只约束 email+project）
+    if let Some(existing) = find_order(pool, &email, Some(project_code)).await? {
+        if existing.user_id == user_id {
+            return Ok(existing);
+        }
+        return Err(AppError::forbidden(format!(
+            "该邮箱已被其他用户占用: {email}"
+        )));
     }
 
     let mut tx = pool.begin().await?;
@@ -823,6 +838,90 @@ pub async fn list_recharge_orders(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::str::FromStr;
+
+    async fn setup() -> SqlitePool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(opts).await.unwrap();
+        crate::db::init_db(&pool).await.unwrap();
+        // 两个有钱用户
+        for (id, name) in [(1i64, "u1"), (2i64, "u2")] {
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, status, balance, \n                 frozen_balance, total_recharged, total_charged, created_at) \n                 VALUES (?, ?, '', ?, 1, 100000, 0, 0, 0, ?)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(ROLE_USER)
+            .bind(crate::util::now_naive())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    /// 回归：同一邮箱在不同项目下，第二个用户的 hold 必须自建订单，
+    /// 不能返回别人的旧订单（跨用户串单 / 逃费）。
+    #[tokio::test]
+    async fn hold_does_not_reuse_other_users_order_across_projects() {
+        let pool = setup().await;
+        let email = "shared@x.test";
+
+        let o1 = hold(&pool, 1, email, "proj-a", "outlook", Money::from_milli(18))
+            .await
+            .unwrap();
+        assert_eq!(o1.user_id, 1);
+        assert_eq!(o1.project_code, "proj-a");
+
+        // 用户 2 拿同一个号做另一个项目：必须新建，且冻结用户 2 的钱
+        let o2 = hold(&pool, 2, email, "proj-b", "outlook", Money::from_milli(18))
+            .await
+            .unwrap();
+        assert_eq!(o2.user_id, 2, "不能返回用户 1 的订单");
+        assert_eq!(o2.project_code, "proj-b");
+        assert_ne!(o2.id, o1.id);
+
+        let frozen: i64 = sqlx::query_scalar("SELECT frozen_balance FROM users WHERE id = 2")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(frozen, 18, "用户 2 应该被冻结");
+    }
+
+    /// 同一 (邮箱, 项目) 被他人占着 → 报冲突，而不是静默复用
+    #[tokio::test]
+    async fn hold_rejects_same_project_taken_by_another_user() {
+        let pool = setup().await;
+        let email = "dup@x.test";
+        hold(&pool, 1, email, "proj-a", "outlook", Money::from_milli(18))
+            .await
+            .unwrap();
+        let r = hold(&pool, 2, email, "proj-a", "outlook", Money::from_milli(18)).await;
+        assert!(matches!(r, Err(AppError::Forbidden(_))), "应为 Forbidden，实际 {r:?}");
+    }
+
+    /// 同一用户同一 (邮箱, 项目) 重复 hold → 幂等返回同一条
+    #[tokio::test]
+    async fn hold_is_idempotent_for_same_user_and_project() {
+        let pool = setup().await;
+        let email = "idem@x.test";
+        let a = hold(&pool, 1, email, "proj-a", "outlook", Money::from_milli(18))
+            .await
+            .unwrap();
+        let b = hold(&pool, 1, email, "proj-a", "outlook", Money::from_milli(18))
+            .await
+            .unwrap();
+        assert_eq!(a.id, b.id, "应返回同一条订单");
+
+        let frozen: i64 = sqlx::query_scalar("SELECT frozen_balance FROM users WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(frozen, 18, "重复 hold 不能重复冻结");
+    }
 
     #[test]
     fn snapshot_zero_shape() {
