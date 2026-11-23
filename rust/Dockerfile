@@ -4,16 +4,24 @@
 # 构建：docker build -t mailpool-rust:1.0 -f rust/Dockerfile .
 #
 # 设计取舍：
-#   - 多阶段构建：builder 里编译，runtime 用 distroless（无 shell、无包管理器）
+#   - 多阶段构建：builder 里编译，runtime 用 debian-slim（要 libssl3 动态库）
 #   - 静态链接 musl：产物是单文件，能跑在任何 Linux 上
 #   - 非 root 运行（uid 1000），数据目录需要可写
 #   - 模板与静态资源**必须**带进镜像（不像 Python 版能直接挂仓库目录）
 # ---------------------------------------------------------------------------
 
 # ── 阶段 1：编译 ────────────────────────────────────────────────────────
-FROM rust:1.94-bookworm AS builder
+FROM rust:1.100-bookworm AS builder
 
 WORKDIR /build
+
+# 构建期依赖：
+#   pkg-config / libssl-dev —— imap 走 native-tls → openssl-sys，没有头文件直接编译失败
+#   ca-certificates        —— 拉 crates.io 用
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # 先只拷依赖清单，让 cargo 层可缓存（改代码不用重下依赖）
 COPY rust/Cargo.toml rust/Cargo.lock ./
@@ -32,7 +40,7 @@ FROM debian:bookworm-slim
 # ca-certificates：Graph/IMAP 的 TLS 需要根证书
 # tzdata：TZ=Asia/Shanghai 生效（日志时间、定时任务窗口）
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # 非 root 用户（与 Python 版 Dockerfile 的 UID 保持一致，宿主目录权限不用改）
