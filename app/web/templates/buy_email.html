@@ -128,7 +128,7 @@
 
 {% block scripts %}
 <script>
-async function copyProjectCode(ev, code) {
+function copyProjectCode(ev, code) {
     ev.stopPropagation();
     navigator.clipboard.writeText(code).then(() => {
         toast('已复制 ' + code, 'ok');
@@ -137,7 +137,7 @@ async function copyProjectCode(ev, code) {
     });
 }
 
-function buyEmail(code) {
+async function buyEmail(code) {
     const btns = document.querySelectorAll('.mn-mall-buy');
     btns.forEach(b => b.disabled = true);
     try {
