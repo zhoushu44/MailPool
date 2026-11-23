@@ -465,7 +465,7 @@ async fn user_login_submit(
         // 原来跳 /recharges 是照搬 Python 的行为，但客户的第一个动作
         // 几乎总是买号，跳到充值页等于多让人点一次。
         // 管理员角色则直接进后台仪表盘。
-        let target = if is_admin_role { "/" } else { "/app/buy-email" };
+        let target = if is_admin_role { "/overview" } else { "/app/buy-email" };
         return Ok((jar.add(cookie), Redirect::to(target)).into_response());
     }
 
@@ -496,14 +496,24 @@ async fn user_logout(jar: CookieJar) -> Response {
 //  仪表盘 / 静态壳页面
 // ────────────────────────────────────────────────────────────────
 
-/// `GET /` —— 仪表盘：池子计数 + 项目卡片 + 最近 10 封收件。
+/// `GET /` —— 站点入口：按身份分流。
+///
+/// 原来这里直接是后台仪表盘，访客打开网站第一眼是「输入管理口令」——
+/// 像个内部工具。现在：
+///   管理员会话 → 渲染后台仪表盘（下面逻辑不变）
+///   客户会话   → /app/buy-email（商城）
+///   匿名       → /app/login（客户登录页，带「没有账户？注册」）
+/// 后台口令登录在 /login 显式访问（管理员自己知道路）。
 async fn dashboard(
     State(st): State<Arc<AppState>>,
     Extension(t): Extension<Arc<Templates>>,
     identity: Identity,
 ) -> AppResult<Response> {
     if !identity.is_admin {
-        return Ok(redirect_302("/login"));
+        if identity.user_id.is_some() {
+            return Ok(redirect_302("/app/buy-email"));
+        }
+        return Ok(redirect_302("/app/login"));
     }
 
     let billing_cfg = settings::get_billing_config(&st.pool).await?;
