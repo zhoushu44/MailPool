@@ -49,6 +49,9 @@
 let _currentEmail = {{ (selected_email or '')|tojson }};
 let _timer = null;
 let _deadline = null;
+const HOLD_SECS = {{ hold_timeout|default(1200) }};   // 占用时长（秒），后端配置
+let _emailMeta = {};                                   // email -> my-emails 里的那一项
+let _tick = null;                                      // 倒计时 interval
 
 /* ── 加载我的邮箱列表 ── */
 async function loadEmails() {
@@ -64,6 +67,10 @@ async function loadEmails() {
             box.innerHTML = '<div class="mb-empty">还没有取过邮箱<br><a href="/app/buy-email">去选择项目</a></div>';
             return;
         }
+        // 记录每个邮箱的状态/下单时间，倒计时要用
+        _emailMeta = {};
+        items.forEach(it => { _emailMeta[it.email] = it; });
+
         box.innerHTML = items.map(it => {
             const active = it.email === _currentEmail ? ' active' : '';
             const dot = it.status === 'holding'
@@ -76,9 +83,50 @@ async function loadEmails() {
                  +   '<div class="mb-item-meta">' + esc(it.project_code || '') + '</div>'
                  + '</div></div>';
         }).join('');
+        startCountdown();
     } catch (e) {
         box.innerHTML = '<div class="mb-empty">加载失败：' + esc(e.message) + '</div>';
     }
+}
+
+/* ── 占用倒计时 ── */
+function startCountdown() {
+    stopCountdown();
+    const el = document.getElementById('countdown');
+    if (!el) return;
+    const meta = _emailMeta[_currentEmail];
+    if (!meta) { el.textContent = ''; el.className = 'mb-countdown'; return; }
+
+    // 只在「占用中」时倒计时；已释放/已完成不显示
+    const holding = meta.status === 'holding' || meta.status === 'pending';
+    if (!holding) {
+        el.textContent = meta.status === 'released' ? '已释放' : '';
+        el.className = 'mb-countdown mb-countdown-idle';
+        return;
+    }
+    const placed = Date.parse(meta.created_at || meta.acquired_at || '') || Date.now();
+    _deadline = placed + HOLD_SECS * 1000;
+
+    const tick = () => {
+        const left = Math.max(0, _deadline - Date.now());
+        const s = Math.ceil(left / 1000);
+        const mm = Math.floor(s / 60);
+        const ss = String(s % 60).padStart(2, '0');
+        el.textContent = '⏱ 剩余 ' + mm + ':' + ss;
+        el.className = 'mb-countdown' + (s <= 30 ? ' mb-countdown-warn' : '');
+        if (left <= 0) {
+            el.textContent = '已超时释放';
+            el.className = 'mb-countdown mb-countdown-idle';
+            stopCountdown();
+            toast('该邮箱占用已超时释放，请重新获取', 'error');
+        }
+    };
+    tick();
+    _tick = setInterval(tick, 1000);
+}
+
+function stopCountdown() {
+    if (_tick) { clearInterval(_tick); _tick = null; }
 }
 
 function pick(email) {
@@ -98,6 +146,7 @@ async function loadMails() {
     }
     bar.style.display = 'flex';
     document.getElementById('currentEmail').textContent = _currentEmail;
+    startCountdown();
 
     area.innerHTML = '<div class="card"><div class="empty">正在拉取邮件…</div></div>';
     try {
@@ -114,7 +163,20 @@ async function loadMails() {
                 + '</div></div>';
             return;
         }
-        area.innerHTML = items.map((m, i) => {
+        // 收到验证码就顶个大卡片出来（迈巢那种「事件感」）
+        const hit = items.find(m => (m.code || '').trim());
+        const banner = hit
+            ? '<div class="mb-code-banner">'
+            +   '<div class="mb-code-banner-label">✓ 已收到验证码</div>'
+            +   '<div class="mb-code-banner-code" onclick="copyCode(this, '
+            +        JSON.stringify(hit.code.trim()).replace(/"/g,'&quot;') + ')">'
+            +     esc(hit.code.trim()) + '</div>'
+            +   '<div class="mb-code-banner-hint">点击复制 · 来自 '
+            +     esc(String(hit.subject || '邮件')) + '</div>'
+            + '</div>'
+            : '';
+
+        area.innerHTML = banner + items.map((m, i) => {
             // Graph 的原始字段结构：
             //   from: { emailAddress: { address, name } }
             //   receivedDateTime: "2026-11-22T08:20:29Z"
@@ -331,5 +393,34 @@ function esc(s) {
     .mb-mail-subj { font-size: 13.5px; }
     .mb-code { font-size: 18px; }
 }
+/* 收码高亮卡片：收到验证码就顶出来，制造「事件感」 */
+.mb-code-banner {
+    background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+    border: 1px solid rgba(16,185,129,.25);
+    border-radius: 16px;
+    padding: 18px 22px;
+    margin-bottom: 14px;
+}
+.mb-code-banner-label {
+    font-size: 12px; font-weight: 600; color: #059669;
+    letter-spacing: .02em; margin-bottom: 8px;
+}
+.mb-code-banner-code {
+    font-family: ui-monospace, monospace;
+    font-size: 30px; font-weight: 700; color: #065f46;
+    letter-spacing: .06em; cursor: pointer;
+    transition: color .12s;
+}
+.mb-code-banner-code:hover { color: #047857; }
+.mb-code-banner-code.copied { color: #16a34a; }
+.mb-code-banner-hint {
+    font-size: 11.5px; color: #6b7280; margin-top: 7px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 倒计时状态 */
+.mb-countdown-warn { color: #ea580c !important; font-weight: 600; }
+.mb-countdown-idle { color: #94a3b8 !important; }
+
 </style>
 {% endblock %}

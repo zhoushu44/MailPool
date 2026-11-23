@@ -873,6 +873,12 @@ async fn app_mailbox_page(
     let mut ctx = customer_ctx(&identity, billing_cfg.is_enabled(), "mailbox");
     ctx.insert("selected_email".into(), json!(q_str(&q, "email")));
     ctx.insert("selected_project".into(), json!(q_str(&q, "project_code")));
+    // 占用倒计时需要知道 hold_timeout（秒）
+    let mut ctx = ctx;
+    ctx.insert(
+        "hold_timeout".to_string(),
+        serde_json::json!(billing_cfg.hold_timeout_secs()),
+    );
     render_html(&t, "app_mailbox.html", &ctx)
 }
 
