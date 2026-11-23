@@ -201,8 +201,11 @@ pub async fn create_recharge_order(
     .bind(amount.milli())
     .bind(amount.milli())
     .bind(pay_type)
-    .bind(truncate_chars(client_ip, 64))
+    // 注意顺序：列是 (..., status, client_ip, ...)，绑定必须同序。
+    // 原来这里写反了（client_ip 进了 status 列），订单列表的 status
+    // 显示成一串 IP 就是这么来的。
     .bind(TOPUP_PENDING)
+    .bind(truncate_chars(client_ip, 64))
     .bind(now_naive())
     .execute(pool)
     .await?;
