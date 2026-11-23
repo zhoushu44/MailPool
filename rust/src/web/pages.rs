@@ -304,14 +304,36 @@ async fn login_submit(
     State(st): State<Arc<AppState>>,
     Extension(t): Extension<Arc<Templates>>,
     jar: CookieJar,
+    identity: Identity,
     Form(form): Form<LoginForm>,
 ) -> AppResult<Response> {
+    // 限流：同一 IP 10 分钟内最多失败 10 次（防口令爆破）
+    let guard_key = crate::services::login_guard::admin_key(&identity.client_ip);
+    if let crate::services::login_guard::Verdict::Deny { retry_after } =
+        crate::services::login_guard::check(
+            &guard_key,
+            crate::services::login_guard::ADMIN_WINDOW,
+            crate::services::login_guard::ADMIN_MAX,
+        )
+    {
+        let identity = Identity::default();
+        let billing_cfg = settings::get_billing_config(&st.pool).await?;
+        let mut ctx = base_ctx(&identity, billing_cfg.is_enabled(), "");
+        ctx.insert(
+            "error".into(),
+            json!(format!("尝试次数过多，请 {retry_after} 秒后再试")),
+        );
+        return render_html(&t, "login.html", &ctx);
+    }
+
     if crate::auth::verify_admin_password(&form.password) {
+        crate::services::login_guard::clear(&guard_key);
         let mut sess = session_from_jar(&jar);
         sess.insert("admin_ok".into(), json!(true));
         let cookie = session_cookie(&crate::auth::dumps(&sess));
         return Ok((jar.add(cookie), Redirect::to("/")).into_response());
     }
+    crate::services::login_guard::fail(&guard_key);
 
     let identity = Identity::default();
     let billing_cfg = settings::get_billing_config(&st.pool).await?;
@@ -381,9 +403,31 @@ async fn user_login_submit(
     State(st): State<Arc<AppState>>,
     Extension(t): Extension<Arc<Templates>>,
     jar: CookieJar,
+    identity: Identity,
     Form(form): Form<UserLoginForm>,
 ) -> AppResult<Response> {
     let username = form.username.trim();
+
+    // 限流：同一 IP + 用户名 15 分钟内最多失败 5 次。
+    // 在验证密码之前拦，避免被拿来当密码校验预言机。
+    let guard_key = crate::services::login_guard::user_key(&identity.client_ip, username);
+    if let crate::services::login_guard::Verdict::Deny { retry_after } =
+        crate::services::login_guard::check(
+            &guard_key,
+            crate::services::login_guard::USER_WINDOW,
+            crate::services::login_guard::USER_MAX,
+        )
+    {
+        let identity0 = Identity::default();
+        let billing_cfg = settings::get_billing_config(&st.pool).await?;
+        let mut ctx = base_ctx(&identity0, billing_cfg.is_enabled(), "");
+        ctx.insert(
+            "error".into(),
+            json!(format!("尝试次数过多，请 {retry_after} 秒后再试")),
+        );
+        ctx.insert("username".into(), json!(form.username));
+        return render_html(&t, "user_login.html", &ctx);
+    }
 
     let mut error: Option<&str> = None;
     // (user_id, 是否管理员角色)
@@ -401,6 +445,7 @@ async fn user_login_submit(
     }
 
     if let Some((uid, is_admin_role)) = user_id {
+        crate::services::login_guard::clear(&guard_key);
         let mut sess = session_from_jar(&jar);
         sess.insert("user_id".into(), json!(uid));
         sess.insert("username".into(), json!(username));
@@ -423,6 +468,8 @@ async fn user_login_submit(
         let target = if is_admin_role { "/" } else { "/app/buy-email" };
         return Ok((jar.add(cookie), Redirect::to(target)).into_response());
     }
+
+    crate::services::login_guard::fail(&guard_key);
 
     // 失败页保留用户输入的用户名（模板 value="{{ username }}"），省得重打
     let identity = Identity::default();

@@ -460,6 +460,20 @@
             <input type="number" id="s3-retain-days" placeholder="14" min="0">
             <div class="mn-detail-hint">0 = 不按时间清理。与份数是「或」关系</div>
         </div>
+        <div>
+            <label>定时备份频率</label>
+            <select id="s3-schedule">
+                <option value="off">关闭（只手动备份）</option>
+                <option value="daily">每天</option>
+                <option value="weekly">每周一</option>
+                <option value="hourly">每小时</option>
+            </select>
+        </div>
+        <div>
+            <label>执行时刻</label>
+            <input type="time" id="s3-schedule-time" value="03:00">
+            <div class="mn-detail-hint">每周一 / 每天 用这个时刻；每小时用其中的分钟</div>
+        </div>
     </div>
     <div style="margin-top:16px">
         <button class="btn" onclick="saveS3()">保存备份配置</button>
@@ -705,6 +719,8 @@ async function loadS3Config() {
         g('s3-prefix', c.prefix);
         g('s3-retain-count', c.retain_count);
         g('s3-retain-days', c.retain_days);
+        g('s3-schedule', c.schedule || 'off');
+        g('s3-schedule-time', c.schedule_time || '03:00');
         ck('s3-enabled', c.enabled);
         ck('s3-path-style', c.force_path_style);
         document.getElementById('s3-sk-hint').textContent =
@@ -722,6 +738,8 @@ async function saveS3() {
         prefix: document.getElementById('s3-prefix').value.trim(),
         retain_count: parseInt(document.getElementById('s3-retain-count').value || '10', 10),
         retain_days: parseInt(document.getElementById('s3-retain-days').value || '14', 10),
+        schedule: document.getElementById('s3-schedule').value,
+        schedule_time: document.getElementById('s3-schedule-time').value,
         enabled: document.getElementById('s3-enabled').checked,
         force_path_style: document.getElementById('s3-path-style').checked,
         encryption_passphrase: document.getElementById('s3-passphrase').value,

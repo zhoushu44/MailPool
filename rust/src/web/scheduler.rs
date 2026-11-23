@@ -54,10 +54,13 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             if let Err(e) = run_auto_prune(&s1, now).await {
                 tracing::error!("自动剔除任务异常: {e}");
             }
+            if let Err(e) = run_scheduled_backup(&s1, now).await {
+                tracing::error!("定时备份任务异常: {e}");
+            }
         }
     });
 
-    // ── 每分钟：超时释放 + 占用回收 ──
+    // ── 每分钟：超时释放 + 占用回收 + 登录限流清理 ──
     let s2 = state.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
@@ -294,5 +297,83 @@ async fn run_auto_prune(state: &Arc<AppState>, now: chrono::DateTime<chrono::Loc
         &serde_json::to_string(&rep).unwrap_or_default(),
     )
     .await?;
+    Ok(())
+}
+
+
+/// 定时备份到 S3。
+///
+/// 配置在「数据备份」Tab：`schedule` = hourly / daily / weekly / off，
+/// `schedule_time` = "HH:MM"。
+///
+/// 去重靠 `backup_last_run`：记录上次执行的时间戳，同一周期内不重复跑
+/// （ticker 每 5 分钟一次、窗口 5 分钟，正常只会命中一次，
+/// 但重启/时钟漂移可能重复触发）。
+///
+/// **失败不重试**：靠下一个周期。但 `run_backup` 内部对上传已做
+/// 3 次指数退避，所以单次失败通常是网络/凭证问题，立刻重试也没用。
+async fn run_scheduled_backup(
+    state: &Arc<AppState>,
+    now: chrono::DateTime<chrono::Local>,
+) -> anyhow::Result<()> {
+    let cfg = crate::services::backup::load_config(&state.pool).await?;
+    if !cfg.enabled || !cfg.is_configured() {
+        return Ok(());
+    }
+
+    let schedule = cfg.schedule.trim().to_ascii_lowercase();
+    if schedule.is_empty() || schedule == "off" {
+        return Ok(());
+    }
+
+    // 解析 schedule_time "HH:MM"（容错：解析失败用 03:00）
+    let (hour, minute) = {
+        let t = cfg.schedule_time.trim();
+        let mut it = t.split(':');
+        let h = it.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(3);
+        let m = it.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+        (h.min(23), m.min(59))
+    };
+
+    // 周期判定
+    let due = match schedule.as_str() {
+        "hourly" => now.minute() == minute,
+        "weekly" => {
+            use chrono::Datelike;
+            now.weekday() == chrono::Weekday::Mon && in_window(now, hour, minute)
+        }
+        _ => in_window(now, hour, minute), // daily / 未知值按 daily
+    };
+    if !due {
+        return Ok(());
+    }
+
+    // 去重：hourly 按小时，其余按天
+    let stamp = match schedule.as_str() {
+        "hourly" => now.format("%Y-%m-%dT%H").to_string(),
+        _ => now.format("%Y-%m-%d").to_string(),
+    };
+    let last = crate::services::settings::get_value(&state.pool, "backup_last_run", "")
+        .await
+        .unwrap_or_default();
+    if last == stamp {
+        return Ok(());
+    }
+
+    // 先记时间戳再跑：避免备份耗时超过 tick 间隔导致重复触发
+    crate::services::settings::set_value(&state.pool, "backup_last_run", &stamp).await?;
+
+    tracing::info!("[backup] 定时备份启动（schedule={schedule}）");
+    match crate::services::backup::run_backup(&state.pool, &cfg).await {
+        Ok(rec) => {
+            tracing::info!(
+                "[backup] 完成 key={} 上传 {} B 耗时 {}ms",
+                rec.key, rec.upload_size, rec.duration_ms
+            );
+        }
+        Err(e) => {
+            tracing::warn!("[backup] 定时备份失败（等下一个周期）: {e}");
+        }
+    }
     Ok(())
 }

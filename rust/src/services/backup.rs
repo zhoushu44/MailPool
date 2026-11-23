@@ -558,6 +558,16 @@ async fn build_client(cfg: &S3Config) -> aws_sdk_s3::Client {
 
     let mut builder = aws_sdk_s3::config::Builder::new()
         .behavior_version(BehaviorVersion::latest())
+        // 超时：AWS SDK 默认连接超时只有 3.1 秒，跨国链路（服务器在境外、
+        // COS 在广州）实测偶发 `HTTP connect timeout occurred after 3.1s`
+        // —— 重试 3 次全失败，备份直接丢。这里放到 15/120/180 秒。
+        .timeout_config(
+            aws_sdk_s3::config::timeout::TimeoutConfig::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(120))
+                .operation_attempt_timeout(Duration::from_secs(180))
+                .build(),
+        )
         .region(Region::new(if cfg.region.trim().is_empty() {
             "auto".to_string()
         } else {
