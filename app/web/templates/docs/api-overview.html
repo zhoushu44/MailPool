@@ -11,9 +11,14 @@
     <p><code>http://localhost:8000</code>（默认端口，按部署环境替换）</p>
 
     <h3>鉴权方式</h3>
-    <p>除产品信息接口外，API 请求需要携带 API Key（在「设置」页生成）。</p>
-    <pre class="doc-code">Authorization: Bearer YOUR_API_KEY</pre>
-    <pre class="doc-code">curl /api/v1/mails -H "Authorization: Bearer YOUR_API_KEY"</pre>
+    <p>接口有两套身份，按用途选择：</p>
+    <p><strong>① API Key</strong>（服务端集成 / 第三方调用，取号收码主流程）：在「设置」页生成。</p>
+    <pre class="doc-code">Authorization: Bearer YOUR_API_KEY
+curl /api/v1/mails -H "Authorization: Bearer YOUR_API_KEY"</pre>
+    <p><strong>② 登录会话</strong>（账户、独占邮箱、客户收件、充值）：网页登录（<code>/app/login</code>）后浏览器持有的 Cookie。</p>
+    <pre class="doc-code">Cookie: mailpool_session=eyJ...
+curl /api/app/mailbox/my-emails -H "Cookie: mailpool_session=eyJ..."</pre>
+    <p>各章节已标注需要哪种身份。</p>
 
     <h3>响应格式</h3>
     <p>业务接口统一返回 JSON：</p>
@@ -302,6 +307,199 @@
         "project_count": 1
     }
 }</pre>
+</section>
+
+<section class="doc-section">
+    <h2>8. 账户注册与登录（邮箱验证码）</h2>
+    <p>面向网页客户的账户体系。注册时向邮箱发送 6 位纯数字验证码（10 分钟内有效，错误 5 次作废，校验成功立即失效）。除特别说明外无需 API Key。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/auth/config</code></div>
+    <p>查询登录注册策略（是否开放注册、是否强制邮箱验证、是否支持邮箱验证码登录）。前端按此决定显示哪些登录方式。</p>
+    <pre class="doc-code">curl /api/v1/auth/config
+{
+    "code": "00000",
+    "data": {
+        "allow_register": true,
+        "allow_password_login": true,
+        "require_email_verify": true,
+        "email_login_enabled": true
+    }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/auth/send-code</code></div>
+    <p>发送验证码到指定邮箱。限流：同一邮箱 60 秒冷却、每小时最多 5 封；同一 IP 每小时最多 20 封。</p>
+    <pre class="doc-code">curl -X POST /api/v1/auth/send-code \
+    -H "Content-Type: application/json" \
+    -d '{ "email": "you@example.com", "purpose": "register" }'
+{
+    "code": "00000",
+    "data": { "sent": true, "ttl_minutes": 10, "message": "验证码已发送，请查收邮件" }
+}</pre>
+    <table class="doc-table">
+        <thead><tr><th>字段</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>email</td><td>string</td><td>是</td><td>接收验证码的邮箱</td></tr>
+            <tr><td>purpose</td><td>string</td><td>否</td><td><code>register</code>（默认，注册）/ <code>reset</code>（登录、换绑）</td></tr>
+        </tbody>
+    </table>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/auth/register</code></div>
+    <p>注册账户。用户名 3-32 位（字母数字 <code>_-.</code>），密码 8-128 位；开启邮箱验证时必须带有效验证码。</p>
+    <pre class="doc-code">curl -X POST /api/v1/auth/register \
+    -H "Content-Type: application/json" \
+    -d '{
+        "username": "alice",
+        "email": "you@example.com",
+        "password": "your-password",
+        "code": "765948"
+    }'
+{
+    "code": "00000",
+    "data": { "id": 5, "username": "alice", "email": "you@example.com", "email_verified": true }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/auth/login-code</code></div>
+    <p>邮箱验证码登录（免密码）。<code>purpose</code> 用 <code>reset</code> 的验证码。成功返回会话 token，可直接当 Cookie <code>mailpool_session</code> 使用。</p>
+    <pre class="doc-code">curl -X POST /api/v1/auth/login-code \
+    -H "Content-Type: application/json" \
+    -d '{ "email": "you@example.com", "code": "765948" }'
+{
+    "code": "00000",
+    "data": { "user_id": 5, "username": "alice", "session": "eyJ..." }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/auth/me</code></div>
+    <p>查询当前登录客户的信息。<strong>需要登录会话</strong>（Cookie <code>mailpool_session</code>）。</p>
+    <pre class="doc-code">curl /api/v1/auth/me -H "Cookie: mailpool_session=eyJ..."
+{
+    "code": "00000",
+    "data": {
+        "id": 5, "username": "alice",
+        "email": "you@example.com", "email_verified": true,
+        "balance": "10.000", "available_balance": "10.000"
+    }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/auth/rebind-email</code></div>
+    <p>换绑邮箱，需要新邮箱的有效验证码（<code>purpose=reset</code>）。需要登录会话。</p>
+</section>
+
+<section class="doc-section">
+    <h2>9. 独占邮箱</h2>
+    <p>买断一个邮箱长期持有：购买后该邮箱<strong>只属于你</strong>，不会被分配给其他用户，不限项目、不限时长，可反复收件，也可主动释放回池。</p>
+    <p><strong>除库存查询外，以下接口均需登录会话</strong>（Cookie <code>mailpool_session</code>）。与 API Key（服务端集成）是两套身份。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/exclusive/stock</code></div>
+    <p>查询可售的独占邮箱数量。无需登录。</p>
+    <pre class="doc-code">curl /api/app/exclusive/stock
+{ "code": "00000", "data": { "available": 35 } }</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/app/exclusive/buy</code></div>
+    <p>购买独占邮箱。开启计费且配置了单价时一次性扣费（买断式，付钱即得）。</p>
+    <pre class="doc-code">curl -X POST /api/app/exclusive/buy \
+    -H "Cookie: mailpool_session=eyJ..." \
+    -H "Content-Type: application/json" \
+    -d '{ "count": 1 }'
+{
+    "code": "00000",
+    "data": [
+        { "id": 3, "email": "jackie@outlook.com", "status": "active", "price": "30.000" }
+    ]
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/exclusive/list</code></div>
+    <p>列出我持有的独占邮箱（仅 active）。</p>
+    <pre class="doc-code">curl /api/app/exclusive/list -H "Cookie: mailpool_session=eyJ..."
+{
+    "code": "00000",
+    "data": { "total": 1, "items": [ { "id": 3, "email": "jackie@outlook.com", "status": "active" } ] }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/app/exclusive/release</code></div>
+    <p>释放独占邮箱回公共池。释放后其他用户可能买到，操作前请确认不再需要。</p>
+    <pre class="doc-code">curl -X POST /api/app/exclusive/release \
+    -H "Cookie: mailpool_session=eyJ..." \
+    -H "Content-Type: application/json" \
+    -d '{ "email": "jackie@outlook.com" }'
+{ "code": "00000", "data": { "email": "jackie@outlook.com", "released": true } }</pre>
+</section>
+
+<section class="doc-section">
+    <h2>10. 客户收件（我的邮箱）</h2>
+    <p>以登录客户身份查看自己取过的邮箱与新邮件。临时邮箱和独占邮箱都会出现在列表里。所有接口需登录会话。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/mailbox/my-emails</code></div>
+    <p>我取过的邮箱，按时间倒序。<code>status</code> 为 <code>holding</code>（占用中）或 <code>released</code>。</p>
+    <pre class="doc-code">curl "/api/app/mailbox/my-emails?limit=30" -H "Cookie: mailpool_session=eyJ..."
+{
+    "code": "00000",
+    "data": {
+        "total": 2,
+        "items": [
+            { "email": "a@outlook.com", "project_code": "(独占)", "status": "holding" },
+            { "email": "b@outlook.com", "project_code": "chatgpt001", "status": "released" }
+        ]
+    }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/mailbox/messages</code></div>
+    <p>拉取某个邮箱的邮件列表（独占邮箱返回全部邮件）。每封邮件自动带 <code>code</code> 字段（规则提取的验证码，可能为空）。只能查自己取过的邮箱。</p>
+    <table class="doc-table">
+        <thead><tr><th>参数</th><th>类型</th><th>必填</th><th>说明</th></tr></thead>
+        <tbody>
+            <tr><td>email</td><td>string</td><td>是</td><td>邮箱地址</td></tr>
+            <tr><td>folder</td><td>string</td><td>否</td><td>默认 <code>inbox</code></td></tr>
+            <tr><td>top</td><td>number</td><td>否</td><td>拉取条数，默认 15，上限 50</td></tr>
+        </tbody>
+    </table>
+    <pre class="doc-code">curl "/api/app/mailbox/messages?email=a@outlook.com&top=15" \
+    -H "Cookie: mailpool_session=eyJ..."
+{
+    "code": "00000",
+    "data": {
+        "total": 1,
+        "items": [
+            {
+                "subject": "Your temporary ChatGPT verification code",
+                "from": { "emailAddress": { "address": "noreply@tm.openai.com", "name": "ChatGPT" } },
+                "receivedDateTime": "2026-11-22T08:20:29Z",
+                "bodyPreview": "Your code is 765948...",
+                "code": "765948"
+            }
+        ]
+    }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/mailbox/message</code></div>
+    <p>单封邮件详情。参数：<code>email</code> + <code>message_id</code>（从列表接口取得）。</p>
+</section>
+
+<section class="doc-section">
+    <h2>11. 充值</h2>
+    <p>余额充值（扫码支付 / 充值卡）。需登录会话或 API Key。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/recharge/channels</code></div>
+    <p>可用支付方式列表。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/recharge/create</code></div>
+    <p>创建充值订单，返回支付链接 / 二维码内容。</p>
+    <pre class="doc-code">curl -X POST /api/v1/recharge/create \
+    -H "Cookie: mailpool_session=eyJ..." \
+    -H "Content-Type: application/json" \
+    -d '{ "amount": "10.00", "channel": "alipay" }'</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/recharge/query</code></div>
+    <p>查询订单支付状态（轮询用）。参数：<code>order_id</code>。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/v1/recharge/orders</code></div>
+    <p>我的充值订单列表，支持 <code>page</code> / <code>page_size</code>。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/v1/recharge/redeem-card</code></div>
+    <p>充值卡兑换。参数：<code>card</code>（卡密）。</p>
+    <pre class="doc-code">curl -X POST /api/v1/recharge/redeem-card \
+    -H "Cookie: mailpool_session=eyJ..." \
+    -H "Content-Type: application/json" \
+    -d '{ "card": "MP-XXXX-XXXX" }'</pre>
 </section>
 
 <section class="doc-section">

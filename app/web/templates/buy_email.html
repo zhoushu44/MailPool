@@ -46,6 +46,13 @@
         <div class="mn-mall-main">
             <div class="mn-mall-info">
                 <div class="mn-mall-name">{{ p.name or p.code }}</div>
+                {# 项目代码：调用 API 时 project_code 要填这个值，
+                   客户需要能看到并复制，所以显示在名称下方 #}
+                <div class="mn-mall-code-line">
+                    <code class="mn-mall-code">{{ p.code }}</code>
+                    <button type="button" class="mn-copy-btn"
+                            onclick="copyProjectCode(event, {{ p.code|tojson }})">复制</button>
+                </div>
                 <div class="mn-mall-row">
                     {% if p.available is not none %}
                         {% if p.available > 0 %}
@@ -89,9 +96,48 @@
 {% endif %}
 {% endblock %}
 
+
+<style>
+/* 项目代码行：等宽小字 + 复制按钮，不抢主视觉 */
+.mn-mall-code-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 7px;
+}
+.mn-mall-code {
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    color: #64748b;
+    background: #f1f5f9;
+    padding: 2px 7px;
+    border-radius: 5px;
+    letter-spacing: 0;
+}
+.mn-copy-btn {
+    border: none;
+    background: transparent;
+    color: #2563eb;
+    font-size: 11.5px;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 4px;
+}
+.mn-copy-btn:hover { background: #eff6ff; }
+</style>
+
 {% block scripts %}
 <script>
-async function buyEmail(code) {
+async function copyProjectCode(ev, code) {
+    ev.stopPropagation();
+    navigator.clipboard.writeText(code).then(() => {
+        toast('已复制 ' + code, 'ok');
+    }).catch(() => {
+        toast('复制失败，请手动选中', 'error');
+    });
+}
+
+function buyEmail(code) {
     const btns = document.querySelectorAll('.mn-mall-buy');
     btns.forEach(b => b.disabled = true);
     try {
