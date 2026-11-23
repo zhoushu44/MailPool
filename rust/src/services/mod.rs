@@ -7,6 +7,7 @@ pub mod mail;
 pub mod mailer;
 pub mod payment;
 pub mod pool;
+pub mod private_email;
 pub mod prune;
 pub mod settings;
 pub mod verification;

@@ -85,6 +85,11 @@ async fn ensure_owns(
         return Ok(());
     }
 
+    // 私有邮箱：客户自己上传的号
+    if crate::services::private_email::owns(pool, uid, email).await? {
+        return Ok(());
+    }
+
     Err(AppError::unauthorized("这个邮箱不在你的取号记录里"))
 }
 
@@ -140,11 +145,16 @@ async fn my_emails(
              SELECT x.email AS mail, '(独占)' AS proj, x.created_at AS ts \
              FROM exclusive_emails x \
              WHERE x.user_id = ? AND x.status = 'active' \
+              UNION \
+              SELECT p.email AS mail, '(私有)' AS proj, p.created_at AS ts \
+              FROM private_emails p \
+              WHERE p.user_id = ? AND p.status = 'active' \
          ) AS sub \
          LEFT JOIN email_accounts a ON lower(a.email) = lower(sub.mail) \
          GROUP BY lower(sub.mail) \
          ORDER BY MAX(sub.ts) DESC LIMIT ?",
     )
+    .bind(uid)
     .bind(uid)
     .bind(uid)
     .bind(uid)

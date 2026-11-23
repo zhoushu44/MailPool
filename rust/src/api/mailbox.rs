@@ -173,6 +173,17 @@ fn fallback_log(reason: &str, empty: AiCodeResult) -> AiCodeResult {
 
 /// 取某邮箱凭证（含代理）并构造 HTTP 客户端。
 async fn cred_for(pool: &SqlitePool, email: &str) -> AppResult<(crate::providers::outlook::Credentials, reqwest::Client)> {
+    // 私有邮箱（客户自己上传的号）：不在号池里，走 private_emails 表
+    if let Some(cred) = crate::services::private_email::credentials_for(pool, email).await? {
+        let mut cred = cred;
+        cred.email = email.to_string();
+        if !cred.is_complete() {
+            return Err(AppError::bad_request("该私有邮箱缺少 client_id / refresh_token"));
+        }
+        let http = crate::providers::outlook::build_http_client(&cred.proxy)?;
+        return Ok((cred, http));
+    }
+
     let Some(acc) = crate::services::pool::get_account_by_email(pool, email).await? else {
         return Err(AppError::not_found("Outlook 账号不存在"));
     };

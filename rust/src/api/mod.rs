@@ -4,5 +4,6 @@ pub mod auth;
 pub mod backup;
 pub mod exclusive;
 pub mod mailbox;
+pub mod private_email;
 pub mod public;
 pub mod recharge;

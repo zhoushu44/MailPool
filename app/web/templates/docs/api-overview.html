@@ -503,6 +503,44 @@ curl /api/app/mailbox/my-emails -H "Cookie: mailpool_session=eyJ..."</pre>
 </section>
 
 <section class="doc-section">
+    <h2>12. 私有邮箱（上传自己的号）</h2>
+    <p>上传<b>你自己</b>的 Outlook 凭据（Refresh Token），平台统一代收件。不占平台库存，免费。上传时逐条验证（刷新 token + Graph /me 比对真实地址）。所有接口需登录会话。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/app/private/upload</code></div>
+    <p>批量上传，每行一条，一次最多 20 条。支持三种行格式：</p>
+    <pre class="doc-code">邮箱----密码----ClientID----RefreshToken   # 4 段（交付格式，密码弃用）
+邮箱----ClientID----RefreshToken         # 3 段
+{"email":"...","client_id":"...","refresh_token":"..."}</pre>
+    <pre class="doc-code">curl -X POST /api/app/private/upload \
+    -H "Cookie: mailpool_session=eyJ..." \
+    -H "Content-Type: application/json" \
+    -d '{ "text": "a@outlook.com----9e5f94bc-xxxx----M.C546_BAY..." }'
+{
+    "code": "00000",
+    "data": {
+        "added": 1, "failed": 0,
+        "items": [ { "email": "a@outlook.com", "status": "active" } ],
+        "failures": []
+    }
+}</pre>
+    <p>验证失败的行也会入库但标记 <code>invalid</code> 并附原因（如「token 刷新失败: invalid_grant」）；填写地址与 Graph /me 实际地址不一致时以实际地址为准。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-get">GET</span><code class="doc-path-inline">/api/app/private/list</code></div>
+    <pre class="doc-code">curl /api/app/private/list -H "Cookie: mailpool_session=eyJ..."
+{
+    "code": "00000",
+    "data": { "total": 1, "active": 1, "items": [ { "email": "a@outlook.com", "status": "active" } ] }
+}</pre>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/app/private/verify</code></div>
+    <p>重新验证一条。参数：<code>{"email": "..."}</code>。</p>
+
+    <div class="doc-method-line"><span class="doc-method doc-method-post">POST</span><code class="doc-path-inline">/api/app/private/remove</code></div>
+    <p>删除一条。参数：<code>{"email": "..."}</code>。</p>
+
+    <p><b>收件</b>：走第 10 章「客户收件」的同一套接口 —— 私有邮箱出现在 <code>my-emails</code> 列表里（标记 <code>(私有)</code>），拉信时自动用你上传的凭据。</p>
+</section>
+<section class="doc-section">
     <h2>完整示例（Python）</h2>
     <p>使用 MailPool 提供的邮箱完成注册收码全流程：</p>
     <pre class="doc-code">from time import sleep

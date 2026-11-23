@@ -1,0 +1,209 @@
+{% extends "base_customer.html" %}
+{% block title %}私有邮箱{% endblock %}
+{% block content %}
+<div class="mn-list-head">
+    <div>
+        <div class="page-title">私有邮箱</div>
+        <div class="page-sub">
+            上传<b>你自己</b>的 Outlook 邮箱凭据，平台统一代收件 —— 不占平台库存，免费使用
+        </div>
+    </div>
+</div>
+
+{# 说明卡：对齐 MailNest「私有邮箱托管」的表述 #}
+<div class="pv-hero">
+    <div>
+        <div class="pv-hero-title">自己的号，平台帮你看信</div>
+        <div class="pv-hero-desc">
+            上传 Refresh Token 后即可在「收件箱」查看该邮箱的所有新邮件（含验证码自动解析）。
+            凭据只用于收件，平台会在每次取件时自动刷新 Access Token。
+        </div>
+        <div class="pv-hero-tags">
+            <span class="ex-tag">免费</span>
+            <span class="ex-tag">全部邮件</span>
+            <span class="ex-tag">自动刷新 Token</span>
+            <span class="ex-tag">支持 API</span>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">上传邮箱</div>
+    <div class="page-sub" style="margin-bottom:12px">
+        每行一条，支持三种格式（<code>----</code> 分隔或 JSON）。上传时逐条验证，一次最多 20 条：
+    </div>
+    <pre class="pv-fmt">邮箱----密码----ClientID----RefreshToken     （4 段，交付格式）
+邮箱----ClientID----RefreshToken           （3 段）
+{"email":"...","client_id":"...","refresh_token":"..."}</pre>
+    <textarea id="pvText" rows="5" placeholder="a@outlook.com----pwd----9e5f94bc-xxxx----M.C546_BAY..."
+              style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12.5px"></textarea>
+    <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <button class="btn" id="pvUploadBtn" onclick="uploadPv()">上传并验证</button>
+        <span id="pvResult" style="font-size:13px"></span>
+    </div>
+    <div id="pvFailures" style="margin-top:10px"></div>
+</div>
+
+<div class="card">
+    <div class="card-title">
+        我的私有邮箱
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" onclick="loadPvList()">刷新</button>
+    </div>
+    <div id="pvList">
+        <div class="empty">加载中…</div>
+    </div>
+</div>
+
+<style>
+.pv-hero {
+    background: linear-gradient(135deg, #f8fafc 0%, #f0fdf4 100%);
+    border: 1px solid rgba(226,232,240,.8);
+    border-radius: 16px;
+    padding: 22px 26px;
+    margin-bottom: 18px;
+}
+.pv-hero-title { font-size: 18px; font-weight: 700; color: #0f172a; margin-bottom: 6px; letter-spacing: -0.02em; }
+.pv-hero-desc { font-size: 13.5px; color: #64748b; line-height: 1.65; max-width: 620px; margin-bottom: 12px; }
+.pv-hero-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.pv-fmt {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 11.5px;
+    color: #64748b;
+    overflow-x: auto;
+    margin-bottom: 10px;
+    font-family: ui-monospace, monospace;
+}
+
+.pv-row { display: flex; align-items: center; gap: 12px; padding: 13px 4px; border-bottom: 1px solid rgba(226,232,240,.6); }
+.pv-row:last-child { border-bottom: none; }
+.pv-mail {
+    font-family: ui-monospace, monospace;
+    font-size: 13px;
+    color: #0f172a;
+    flex: 1; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-badge { flex-shrink: 0; font-size: 11.5px; padding: 3px 10px; border-radius: 9999px; font-weight: 550; }
+.pv-badge.active { color: #059669; background: rgba(16,185,129,.1); }
+.pv-badge.invalid { color: #dc2626; background: rgba(239,68,68,.08); }
+.pv-reason { font-size: 11.5px; color: #94a3b8; flex-shrink: 0; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.pv-btn {
+    height: 28px; padding: 0 12px;
+    border-radius: 9999px; border: 1px solid #e2e8f0;
+    background: #fff; color: #0f172a; font-size: 12px;
+    cursor: pointer; text-decoration: none;
+    display: inline-flex; align-items: center;
+}
+.pv-btn:hover { background: #f8fafc; text-decoration: none; }
+.pv-btn-danger { color: #dc2626; border-color: rgba(220,38,38,.25); }
+</style>
+
+<script>
+async function loadPvList() {
+    const box = document.getElementById('pvList');
+    try {
+        const r = await api('/api/app/private/list');
+        if (r.code !== '00000') {
+            box.innerHTML = '<div class="empty">' + esc(r.msg || '加载失败') + '</div>';
+            return;
+        }
+        const items = (r.data && r.data.items) || [];
+        if (!items.length) {
+            box.innerHTML = '<div class="empty">还没有私有邮箱<br>'
+                + '<span style="font-size:12.5px">用上面的输入框上传你的 Outlook 凭据</span></div>';
+            return;
+        }
+        box.innerHTML = items.map(it => {
+            const badge = it.status === 'active'
+                ? '<span class="pv-badge active">有效</span>'
+                : '<span class="pv-badge invalid">无效</span>';
+            const reason = it.status_reason ? '<span class="pv-reason" title="' + esc(it.status_reason) + '">' + esc(it.status_reason) + '</span>' : '';
+            return '<div class="pv-row">'
+                 +   '<div class="pv-mail">' + esc(it.email) + '</div>'
+                 +   badge + reason
+                 +   '<div class="pv-actions">'
+                 +     '<a class="pv-btn" href="/app/mailbox?email=' + encodeURIComponent(it.email) + '">收件</a>'
+                 +     '<button class="pv-btn" onclick="verifyPv(\'' + esc(it.email) + '\')">验证</button>'
+                 +     '<button class="pv-btn pv-btn-danger" onclick="removePv(\'' + esc(it.email) + '\')">删除</button>'
+                 +   '</div>'
+                 + '</div>';
+        }).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>';
+    }
+}
+
+async function uploadPv() {
+    const text = document.getElementById('pvText').value.trim();
+    const btn = document.getElementById('pvUploadBtn');
+    const res = document.getElementById('pvResult');
+    const fails = document.getElementById('pvFailures');
+    if (!text) { res.textContent = '请先粘贴凭据'; return; }
+
+    btn.disabled = true;
+    res.textContent = '验证中（每条约 2-3 秒）…';
+    fails.innerHTML = '';
+    try {
+        const r = await api('/api/app/private/upload', {
+            method: 'POST',
+            body: JSON.stringify({ text })
+        });
+        if (r.code === '00000') {
+            const d = r.data;
+            res.innerHTML = '<span style="color:#16a34a">成功 ' + d.added + ' 个' +
+                (d.failed ? '，失败 <b style="color:#dc2626">' + d.failed + '</b> 个' : '') + '</span>';
+            if (d.failures && d.failures.length) {
+                fails.innerHTML = '<div style="font-size:12px;color:#dc2626;line-height:1.8">' +
+                    d.failures.map(f => esc(f.email || '(空)') + '：' + esc(f.reason)).join('<br>') +
+                    '</div>';
+            }
+            document.getElementById('pvText').value = '';
+            loadPvList();
+        } else {
+            res.innerHTML = '<span style="color:#dc2626">' + esc(r.msg || '上传失败') + '</span>';
+        }
+    } catch (e) {
+        res.innerHTML = '<span style="color:#dc2626">上传失败：' + esc(e.message) + '</span>';
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function verifyPv(email) {
+    toast('验证中…', 'ok');
+    try {
+        const r = await api('/api/app/private/verify', {
+            method: 'POST',
+            body: JSON.stringify({ email })
+        });
+        toast(r.code === '00000' && r.data.status === 'active' ? '验证通过' : ('无效：' + (r.data?.reason || r.msg)), r.code === '00000' && r.data?.status === 'active' ? 'ok' : 'error');
+        loadPvList();
+    } catch (e) { toast('验证失败：' + e.message, 'error'); }
+}
+
+async function removePv(email) {
+    if (!confirm('删除 ' + email + '？\n\n删除后将无法再通过平台收取该邮箱的邮件。')) return;
+    try {
+        const r = await api('/api/app/private/remove', {
+            method: 'POST',
+            body: JSON.stringify({ email })
+        });
+        if (r.code === '00000') { toast('已删除', 'ok'); loadPvList(); }
+        else toast(r.msg || '删除失败', 'error');
+    } catch (e) { toast('删除失败：' + e.message, 'error'); }
+}
+
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+(function init() { loadPvList(); })();
+</script>
+{% endblock %}
