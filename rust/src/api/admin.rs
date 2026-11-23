@@ -2242,6 +2242,11 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             get(refresh_one_token_status),
         )
         .route("/api/admin/pool/heartbeat", post(run_heartbeat))
+        // ── 自动剔除失效号 ──
+        .route("/api/admin/pool/prune-config", get(get_prune_config).post(save_prune_config))
+        .route("/api/admin/pool/prune-preview", get(prune_preview))
+        .route("/api/admin/pool/prune-run", post(prune_run))
+        .route("/api/admin/pool/prune-log", get(prune_log))
         // 收件箱查看（Graph 实时拉取 + 可选 AI 识别）
         .route("/api/admin/mailbox/messages", get(crate::api::mailbox::admin_messages))
         .route("/api/admin/mailbox/message", get(crate::api::mailbox::admin_message))
@@ -2523,4 +2528,125 @@ mod tests {
         // 编译期看不出来 —— 这里必须真的建一次 router 才能兜住。
         let _ = router();
     }
+}
+
+
+// ────────────────────────────────────────────────────────────────
+//  自动剔除失效号
+// ────────────────────────────────────────────────────────────────
+//
+// 只删「完全不能用」的号：health_status='dead'（微软封禁/风控/凭据失效），
+// 且失效满 N 天、不在占用中、不被独占、无 pending 订单。
+// 具体条件见 services/prune.rs 的 CANDIDATE_WHERE。
+
+/// `GET/POST /api/admin/pool/prune-config`
+async fn get_prune_config(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let cfg = crate::services::prune::load_config(&st.pool).await?;
+    let cand = crate::services::prune::preview(&st.pool, cfg.days).await?;
+    Ok(admin_ok(json!({
+        "config": cfg,
+        "pending": cand.len(),
+    })))
+}
+
+async fn save_prune_config(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+    Json(patch): Json<Value>,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let cfg = crate::services::prune::save_config(&st.pool, &patch).await?;
+    Ok(admin_ok(serde_json::to_value(cfg)?))
+}
+
+/// `GET /api/admin/pool/prune-preview` —— 预览会删哪些（不删）。
+async fn prune_preview(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+    Query(q): Query<HashMap<String, String>>,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let cfg = crate::services::prune::load_config(&st.pool).await?;
+    let days = q
+        .get("days")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(cfg.days);
+    let cand = crate::services::prune::preview(&st.pool, days).await?;
+
+    // 按原因汇总 + 前 20 条样例（别一次吐几千条）
+    let mut by_reason: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for c in &cand {
+        let k = if c.health_reason.is_empty() {
+            "(未记录原因)".to_string()
+        } else {
+            c.health_reason.clone()
+        };
+        *by_reason.entry(k).or_insert(0) += 1;
+    }
+    let mut by_reason: Vec<Value> = by_reason
+        .into_iter()
+        .map(|(k, v)| json!({ "reason": k, "count": v }))
+        .collect();
+    by_reason.sort_by(|a, b| {
+        b["count"].as_i64().unwrap_or(0).cmp(&a["count"].as_i64().unwrap_or(0))
+    });
+
+    let sample: Vec<Value> = cand
+        .iter()
+        .take(20)
+        .map(|c| {
+            json!({
+                "email": c.email,
+                "reason": c.health_reason,
+                "fail_count": c.fail_count,
+                "age_days": c.age_days,
+                "last_check_at": crate::util::iso_from_naive(c.last_check_at),
+            })
+        })
+        .collect();
+
+    Ok(admin_ok(json!({
+        "days": days,
+        "total": cand.len(),
+        "by_reason": by_reason,
+        "sample": sample,
+    })))
+}
+
+/// `POST /api/admin/pool/prune-run` —— 立即执行（遵守配置里的 dry_run）。
+async fn prune_run(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let cfg = crate::services::prune::load_config(&st.pool).await?;
+    let rep = crate::services::prune::run(&st.pool, &cfg).await?;
+    Ok(admin_ok(serde_json::to_value(rep)?))
+}
+
+/// `GET /api/admin/pool/prune-log`
+async fn prune_log(
+    State(st): State<Arc<AppState>>,
+    identity: Identity,
+) -> AppResult<Json<Value>> {
+    ensure_admin(&identity)?;
+    let rows = crate::services::prune::history(&st.pool, 100).await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "email": r.email,
+                "reason": r.health_reason,
+                "fail_count": r.fail_count,
+                "age_days": r.age_days,
+                "pruned_at": crate::util::iso_from_naive(Some(r.pruned_at)),
+            })
+        })
+        .collect();
+    Ok(admin_ok(json!({ "items": items })))
 }

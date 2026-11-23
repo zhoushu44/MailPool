@@ -51,6 +51,9 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<()> {
             if let Err(e) = run_refresh_tokens(&s1, now).await {
                 tracing::error!("定时刷新任务异常: {e}");
             }
+            if let Err(e) = run_auto_prune(&s1, now).await {
+                tracing::error!("自动剔除任务异常: {e}");
+            }
         }
     });
 
@@ -243,4 +246,53 @@ mod tests {
         assert!(in_window(at(23, 59), 23, 58));
         assert!(!in_window(at(0, 1), 23, 58));
     }
+}
+
+
+/// 自动剔除「完全不能用」的号（微软封禁/风控/凭据失效）。
+///
+/// 只删 `health_status='dead'` 且失效满 `days` 天的号；
+/// unhealthy/unknown、占用中、被独占、有 pending 订单的一律不碰。
+/// 规则详见 [`crate::services::prune::CANDIDATE_WHERE`]。
+///
+/// 默认 `enabled=false` + `dry_run=true`：破坏性操作必须显式开启，
+/// 而且第一次跑只出报告不真删，让人先看清会删什么。
+async fn run_auto_prune(state: &Arc<AppState>, now: chrono::DateTime<chrono::Local>) -> anyhow::Result<()> {
+    let cfg = crate::services::prune::load_config(&state.pool).await?;
+    if !cfg.enabled {
+        return Ok(());
+    }
+    if !in_window(now, cfg.hour, cfg.minute) {
+        return Ok(());
+    }
+
+    // 同一天只跑一次（ticker 每 5 分钟，窗口 5 分钟，理论上只命中一次，
+    // 但重启/时钟漂移可能重复触发，用 last_run 日期兜底）
+    let last = crate::services::settings::get_value(
+        &state.pool, "prune_last_run", "",
+    )
+    .await
+    .unwrap_or_default();
+    let today = now.format("%Y-%m-%d").to_string();
+    if last == today {
+        return Ok(());
+    }
+
+    tracing::info!("[prune] 自动剔除启动（dry_run={}，冷静期 {} 天）", cfg.dry_run, cfg.days);
+    let rep = crate::services::prune::run(&state.pool, &cfg).await?;
+    tracing::info!(
+        "[prune] 完成：{} {} 个，耗时 {}ms",
+        if rep.dry_run { "演练将删" } else { "已删" },
+        rep.removed,
+        rep.duration_ms
+    );
+
+    crate::services::settings::set_value(&state.pool, "prune_last_run", &today).await?;
+    crate::services::settings::set_value(
+        &state.pool,
+        "prune_last_summary",
+        &serde_json::to_string(&rep).unwrap_or_default(),
+    )
+    .await?;
+    Ok(())
 }

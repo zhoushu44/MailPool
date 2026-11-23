@@ -153,6 +153,64 @@
 </div>
 
 <div class="card">
+    <div class="card-title">自动剔除失效号</div>
+    <p class="page-sub">
+        把<b>完全不能用</b>的号从池子里删掉，减小候选查询和统计噪音。<br>
+        只删「健康状态 = 失效」且满足全部条件的号：失效满冷静期、不在占用中、
+        未被独占持有、没有未结清订单。<br>
+        仅检测失败一次（异常）或未检测过的号<b>不会</b>被删。
+    </p>
+    <form id="prune-form">
+        <div class="toggle-row" style="margin-bottom:10px">
+            <label class="toggle">
+                <input type="checkbox" id="prune-enabled">
+                <span class="toggle-slider"></span>
+            </label>
+            <label>启用每日自动剔除</label>
+        </div>
+        <div class="toggle-row" style="margin-bottom:12px">
+            <label class="toggle">
+                <input type="checkbox" id="prune-dry-run" checked>
+                <span class="toggle-slider"></span>
+            </label>
+            <label>演练模式（只统计不删除）</label>
+        </div>
+        <div class="form-row">
+            <div>
+                <label>失效满（天）</label>
+                <input type="number" id="prune-days" min="1" max="365" value="7">
+            </div>
+            <div>
+                <label>执行时间（小时）</label>
+                <input type="number" id="prune-hour" min="0" max="23" value="4">
+            </div>
+            <div>
+                <label>分钟</label>
+                <input type="number" id="prune-minute" min="0" max="59" value="30">
+            </div>
+        </div>
+        <div class="btn-row">
+            <button type="button" class="btn btn-success" onclick="savePruneConfig()">保存配置</button>
+            <button type="button" class="btn btn-ghost" onclick="previewPrune()">预览会删哪些</button>
+            <button type="button" class="btn btn-danger" onclick="runPruneNow()">立即执行一次</button>
+        </div>
+    </form>
+    <div id="prune-result" style="margin-top:10px"></div>
+
+    <div id="prune-log-wrap" style="margin-top:14px;display:none">
+        <div class="page-sub" style="margin-bottom:6px">最近剔除记录</div>
+        <div class="table-wrap" style="max-height:240px;overflow:auto">
+            <table>
+                <thead><tr>
+                    <th>邮箱</th><th>原因</th><th>失败次数</th><th>失效天数</th><th>时间</th>
+                </tr></thead>
+                <tbody id="prune-log-body"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="card">
     <div class="card-title">心跳保活</div>
     <p class="page-sub">定时对池内 healthy 账号执行 Graph API 静默拉取，保持账号活跃，防止微软风控判定为僵尸号。</p>
     <form id="heartbeat-form">
@@ -430,7 +488,118 @@
 {% endblock %}
 
 {% block scripts %}
+<style>
+.btn-danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+.btn-danger:hover { background: #b91c1c; border-color: #b91c1c; }
+</style>
 <script>
+
+/* ── 自动剔除失效号 ───────────────────────────────────────── */
+async function loadPruneConfig() {
+    try {
+        const r = await api('/api/admin/pool/prune-config');
+        const c = r.data.config || {};
+        const g = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+        const ck = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        ck('prune-enabled', c.enabled);
+        ck('prune-dry-run', c.dry_run);
+        g('prune-days', c.days);
+        g('prune-hour', c.hour);
+        g('prune-minute', c.minute);
+        if (typeof c.days === 'number' && c.days > 0) {
+            document.getElementById('prune-result').innerHTML =
+                '<span style="color:#64748b">当前有 <b>' + (r.data.pending || 0) + '</b> 个号满足剔除条件</span>';
+        }
+        loadPruneLog();
+    } catch (e) { /* 静默 */ }
+}
+
+async function savePruneConfig() {
+    const body = {
+        enabled: document.getElementById('prune-enabled').checked,
+        dry_run: document.getElementById('prune-dry-run').checked,
+        days: parseInt(document.getElementById('prune-days').value || '7', 10),
+        hour: parseInt(document.getElementById('prune-hour').value || '4', 10),
+        minute: parseInt(document.getElementById('prune-minute').value || '30', 10),
+    };
+    try {
+        await api('/api/admin/pool/prune-config', { method: 'POST', body: JSON.stringify(body) });
+        document.getElementById('prune-result').innerHTML = '<span style="color:#16a34a">已保存</span>';
+        loadPruneConfig();
+    } catch (e) {
+        document.getElementById('prune-result').innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+async function previewPrune() {
+    const days = parseInt(document.getElementById('prune-days').value || '7', 10);
+    const box = document.getElementById('prune-result');
+    box.textContent = '统计中…';
+    try {
+        const r = await api('/api/admin/pool/prune-preview?days=' + days);
+        const d = r.data;
+        if (!d.total) {
+            box.innerHTML = '<span style="color:#16a34a">没有满足条件的号（失效满 ' + d.days + ' 天的真死号）</span>';
+            return;
+        }
+        let html = '<div style="margin-bottom:8px">符合条件：<b>' + d.total + '</b> 个</div>';
+        html += '<div style="margin-bottom:10px;font-size:12.5px;color:#64748b">按原因：';
+        html += d.by_reason.map(x => esc(x.reason) + '=' + x.count).join('　');
+        html += '</div>';
+        html += '<table style="font-size:12.5px;width:100%"><thead><tr>'
+             +  '<th style="text-align:left">邮箱</th><th style="text-align:left">原因</th>'
+             +  '<th style="text-align:right">失效天数</th></tr></thead><tbody>';
+        html += d.sample.map(x => '<tr><td class="mono">' + esc(x.email) + '</td><td>'
+             +  esc(x.reason) + '</td><td style="text-align:right">' + x.age_days + '</td></tr>').join('');
+        html += '</tbody></table>';
+        if (d.total > d.sample.length) {
+            html += '<div style="margin-top:6px;color:#94a3b8;font-size:12px">仅显示前 '
+                 + d.sample.length + ' 条</div>';
+        }
+        box.innerHTML = html;
+    } catch (e) {
+        box.innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+async function runPruneNow() {
+    const dry = document.getElementById('prune-dry-run').checked;
+    const msg = dry
+        ? '当前是演练模式，只统计不删除。\n\n继续执行一次统计？'
+        : '⚠ 将真正删除失效号，不可恢复（凭据一并删除）。\n\n确认执行？';
+    if (!confirm(msg)) return;
+    const box = document.getElementById('prune-result');
+    box.textContent = '执行中…';
+    try {
+        const r = await api('/api/admin/pool/prune-run', { method: 'POST', body: '{}' });
+        const d = r.data;
+        const verb = d.dry_run ? '演练：将删' : '已删除';
+        box.innerHTML = '<span style="color:#16a34a">' + verb + ' <b>' + d.removed
+            + '</b> 个，耗时 ' + d.duration_ms + 'ms</span>';
+        loadPruneLog();
+        loadPruneConfig();
+    } catch (e) {
+        box.innerHTML = '<span style="color:#dc2626">' + esc(e.message) + '</span>';
+    }
+}
+
+async function loadPruneLog() {
+    try {
+        const r = await api('/api/admin/pool/prune-log');
+        const items = (r.data && r.data.items) || [];
+        const wrap = document.getElementById('prune-log-wrap');
+        if (!items.length) { wrap.style.display = 'none'; return; }
+        wrap.style.display = '';
+        document.getElementById('prune-log-body').innerHTML = items.slice(0, 50).map(x =>
+            '<tr><td class="mono">' + esc(x.email) + '</td>'
+            + '<td>' + esc(x.reason) + '</td>'
+            + '<td>' + x.fail_count + '</td>'
+            + '<td>' + x.age_days + ' 天</td>'
+            + '<td class="mono">' + esc(String(x.pruned_at || '').replace('T', ' ').slice(0, 19)) + '</td></tr>'
+        ).join('');
+    } catch (e) { /* 静默 */ }
+}
+
 /* ── Tab 切换 ───────────────────────────────────────────────── */
 function switchTab(name) {
     document.querySelectorAll('.tab-panel').forEach(p => {
@@ -442,6 +611,7 @@ function switchTab(name) {
     // 按需懒加载：切到备份 tab 才拉记录
     if (name === 'backup') { loadBackupRecords(); }
     if (name === 'email') { loadSmtpConfig(); }
+    if (name === 'general') { loadPruneConfig(); }
     try { localStorage.setItem('mp_settings_tab', name); } catch (e) {}
 }
 
@@ -655,6 +825,7 @@ function esc(s) {
         switchTab(last);
     } else {
         loadSmtpConfig();
+        loadPruneConfig();
     }
 })();
 function collectForm(id) {

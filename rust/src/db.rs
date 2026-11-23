@@ -285,6 +285,10 @@ pub async fn init_db(pool: &SqlitePool) -> anyhow::Result<()> {
     migrate_add_columns(pool).await?;
 
     // 独占邮箱表（幂等建表 + 给 email_accounts 加 exclusive_owner 列）
+    crate::services::prune::ensure_schema(pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("建剔除日志表失败: {e}"))?;
+
     crate::services::exclusive::ensure_schema(pool)
         .await
         .map_err(|e| anyhow::anyhow!("建独占邮箱表失败: {e}"))?;
