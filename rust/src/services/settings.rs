@@ -177,6 +177,8 @@ pub struct BillingConfig {
     pub epay_url: String,
     pub epay_pid: String,
     pub epay_key: String,
+    /// 展示哪些渠道（逗号分隔，默认 alipay）
+    pub epay_types: String,
     pub site_url: String,
     pub card_default_amount: String,
 }
@@ -193,6 +195,7 @@ impl Default for BillingConfig {
             epay_url: String::new(),
             epay_pid: String::new(),
             epay_key: String::new(),
+    epay_types: "alipay".to_string(),
             site_url: String::new(),
             card_default_amount: "10.00".into(),
         }
@@ -254,6 +257,7 @@ pub async fn get_billing_config(pool: &SqlitePool) -> AppResult<BillingConfig> {
         epay_url: g("epay_url", &d.epay_url),
         epay_pid: g("epay_pid", &d.epay_pid),
         epay_key: g("epay_key", &d.epay_key),
+        epay_types: g("epay_types", &d.epay_types),
         site_url: g("site_url", &d.site_url),
         card_default_amount: g("card_default_amount", &d.card_default_amount),
     })

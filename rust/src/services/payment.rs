@@ -99,12 +99,24 @@ pub fn list_channels(cfg: &BillingConfig) -> Vec<Value> {
     let pid = cfg.epay_pid.trim();
     let key = cfg.epay_key.trim();
     if !gateway.is_empty() && !pid.is_empty() && !key.is_empty() {
+        // 渠道按配置显示：商户在网关侧开了什么就展示什么。
+        // 实测这家的商户号只开了支付宝，微信下单网关会拒 ——
+        // 展示了用户也付不了。默认只放 alipay，
+        // 要加微信时在设置里写 billing.epay_types = "alipay,wxpay"。
+        let enabled: Vec<String> = cfg
+            .epay_types
+            .split(',')
+            .map(|t| t.trim().to_ascii_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
         for (id, name) in PAY_TYPES {
-            out.push(serde_json::json!({
-                "name": id,
-                "display_name": name,
-                "category": "epay",
-            }));
+            if enabled.iter().any(|e| e == id) {
+                out.push(serde_json::json!({
+                    "name": id,
+                    "display_name": name,
+                    "category": "epay",
+                }));
+            }
         }
     }
     out
@@ -604,7 +616,8 @@ mod tests {
     }
 
     #[test]
-    fn channels_visible_with_config() {
+    fn channels_default_alipay_only() {
+        // 默认只展示支付宝（商户号在网关侧只开了这个）
         let cfg = BillingConfig {
             epay_url: "https://pay.test".into(),
             epay_pid: "1001".into(),
@@ -612,8 +625,37 @@ mod tests {
             ..Default::default()
         };
         let ch = list_channels(&cfg);
+        assert_eq!(ch.len(), 1);
+        assert_eq!(ch[0]["name"], "alipay");
+    }
+
+    #[test]
+    fn channels_respect_epay_types_config() {
+        // 配了两个就展示两个
+        let cfg = BillingConfig {
+            epay_url: "https://pay.test".into(),
+            epay_pid: "1001".into(),
+            epay_key: "k".into(),
+            epay_types: "alipay,wxpay".into(),
+            ..Default::default()
+        };
+        let ch = list_channels(&cfg);
         assert_eq!(ch.len(), 2);
         assert_eq!(ch[0]["name"], "alipay");
         assert_eq!(ch[1]["name"], "wxpay");
+    }
+
+    #[test]
+    fn channels_reject_unknown_type() {
+        // 配了不存在的渠道名应被忽略
+        let cfg = BillingConfig {
+            epay_url: "https://pay.test".into(),
+            epay_pid: "1001".into(),
+            epay_key: "k".into(),
+            epay_types: "alipay,qqpay".into(),
+            ..Default::default()
+        };
+        let ch = list_channels(&cfg);
+        assert_eq!(ch.len(), 1, "qqpay 不在 PAY_TYPES 里，不该出现");
     }
 }
