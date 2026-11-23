@@ -60,16 +60,44 @@ jobs:
           sudo apt-get install -y --no-install-recommends pkg-config libssl-dev
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # 钉版本：本地验证过 1.100（1.94.x 不支持 aws-sdk 的 MSRV）
+          toolchain: "1.100"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
-      - name: Run tests
+      - name: Build all targets
         working-directory: rust
-        run: cargo test --all-targets
+        run: cargo build --all-targets --locked 2>&1 | tail -40
+
+      # 日志需要登录 GitHub 才能看，所以失败时把关键输出写进 Job Summary
+      - name: Run tests
+        id: tests
+        working-directory: rust
+        run: |
+          set +e
+          cargo test --all-targets --locked 2>&1 | tee /tmp/test.log
+          CODE=${PIPESTATUS[0]}
+          if [ "$CODE" -ne 0 ]; then
+            {
+              echo "## ❌ cargo test 失败（exit $CODE）"
+              echo '```'
+              grep -E "^(error|warning: unused|test .* FAILED|thread .* panicked|---- .* stdout|assertion|left:|right:)" /tmp/test.log | head -60
+              echo '```'
+              echo "<details><summary>最后 80 行</summary>"
+              echo '```'
+              tail -80 /tmp/test.log
+              echo '```'
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## ✅ cargo test 通过" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $CODE
 
   # =========================================================================
   # Job 2: 构建并推送镜像（仅归档，不部署）
@@ -88,7 +116,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && secrets.DOCKER_HUB_USERNAME != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
@@ -116,7 +144,8 @@ jobs:
           context: .
           file: ./rust/Dockerfile
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
+          # 没配 Docker Hub 密钥时只构建不推送（CI 不该因为归档失败而红）
+          push: ${{ github.event_name != 'pull_request' && secrets.DOCKER_HUB_USERNAME != '' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
